@@ -23,7 +23,8 @@ TOKEN_FILE = os.environ.get("TOKEN_FILE", "/usr/local/remnawave_reverse/token")
 API = os.environ.get("API", "http://127.0.0.1:3000/api").rstrip("/")
 SRC_PROFILE = os.environ.get("SRC_PROFILE", "StealConfig")
 DST_PROFILE = os.environ.get("DST_PROFILE", "eGames-MultiProtocol")
-TAG = os.environ.get("INBOUND_TAG", "Steal")
+TAG = os.environ.get("INBOUND_TAG", "Steal")          # source tag in SRC_PROFILE
+NEW_TAG = os.environ.get("NEW_TAG", "Steal-443")      # tags must be unique across ALL profiles
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "/root/remnawave-backup")
 
 TOKEN = open(TOKEN_FILE).read().strip()
@@ -75,15 +76,17 @@ def main():
     steal = next((ib for ib in src_cfg.get("inbounds", []) if ib.get("tag") == TAG), None)
     if not steal:
         sys.exit(f"inbound '{TAG}' not found in {SRC_PROFILE}")
-    if any(ib.get("tag") == TAG for ib in dst_cfg.get("inbounds", [])):
-        print(f"[=] '{TAG}' already in {DST_PROFILE}; only re-checking attachments")
+    if any(ib.get("tag") == NEW_TAG for ib in dst_cfg.get("inbounds", [])):
+        print(f"[=] '{NEW_TAG}' already in {DST_PROFILE}; only re-checking attachments")
     else:
         used = {ib.get("port") for ib in dst_cfg.get("inbounds", [])}
         if steal.get("port") in used:
             sys.exit(f"port {steal.get('port')} already used in {DST_PROFILE}")
         new_cfg = copy.deepcopy(dst_cfg)
-        new_cfg.setdefault("inbounds", []).append(copy.deepcopy(steal))
-        print(f"[+] plan: add '{TAG}' port={steal.get('port')} to {DST_PROFILE} "
+        clone = copy.deepcopy(steal)
+        clone["tag"] = NEW_TAG
+        new_cfg.setdefault("inbounds", []).append(clone)
+        print(f"[+] plan: add '{TAG}' as '{NEW_TAG}' port={steal.get('port')} to {DST_PROFILE} "
               f"({len(dst_cfg.get('inbounds', []))} -> {len(new_cfg['inbounds'])} inbounds)")
         if not args.apply:
             print("[!] dry-run. Re-run with --apply")
@@ -99,10 +102,10 @@ def main():
     # re-read: new inbound gets its own uuid
     dst = next(p for p in profiles() if p["name"] == DST_PROFILE)
     all_uuids = [ib["uuid"] for ib in dst.get("inbounds", []) if ib.get("uuid")]
-    new_uuid = next((ib["uuid"] for ib in dst.get("inbounds", []) if ib.get("tag") == TAG), None)
+    new_uuid = next((ib["uuid"] for ib in dst.get("inbounds", []) if ib.get("tag") == NEW_TAG), None)
     if not new_uuid:
         sys.exit("new inbound uuid not found after patch")
-    print(f"[+] {DST_PROFILE}: {len(all_uuids)} inbounds, '{TAG}'={new_uuid}")
+    print(f"[+] {DST_PROFILE}: {len(all_uuids)} inbounds, '{NEW_TAG}'={new_uuid}")
 
     nodes = call("GET", "/nodes")
     nodes = nodes if isinstance(nodes, list) else nodes.get("nodes", [])
@@ -118,10 +121,10 @@ def main():
         have = [ib.get("uuid") for ib in (s.get("inbounds") or []) if ib.get("uuid")]
         if dst_set.intersection(have) and new_uuid not in have:
             call("PATCH", "/internal-squads", {"uuid": s["uuid"], "inbounds": have + [new_uuid]})
-            print(f"[+] squad {s.get('name')}: +{TAG}")
+            print(f"[+] squad {s.get('name')}: +{NEW_TAG}")
 
     print("[!] Check Hosts in the panel: a host for port 443 must point to the "
-          f"'{TAG}' inbound of {DST_PROFILE} (old host still references StealConfig).")
+          f"'{NEW_TAG}' inbound of {DST_PROFILE} (old host still references StealConfig).")
 
 
 if __name__ == "__main__":
