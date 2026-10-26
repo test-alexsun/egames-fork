@@ -31,8 +31,7 @@ api_ok() {
 }
 
 wait_api() {
-  local i
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     if api_ok; then
       info "API OK"
       return 0
@@ -62,7 +61,7 @@ main() {
   wait_api || exit 1
 
   info "2/4 Find profile: $PROFILE_NAME"
-  local list profile_uuid name
+  local list profile_uuid
   list=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "${API}/config-profiles")
   profile_uuid=$(printf '%s' "$list" | python3 -c '
 import sys,json

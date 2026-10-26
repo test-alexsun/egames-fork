@@ -74,8 +74,10 @@ detect_panel_token() {
 
 detect_cookie() {
     local line c1 c2
-    if [[ -f "$NGINX_CONF" ]] && grep -q 'map $http_cookie $auth_cookie' "$NGINX_CONF" 2>/dev/null; then
-        line=$(grep -A 3 'map $http_cookie $auth_cookie' "$NGINX_CONF" | grep -E '~\*' | head -n1 || true)
+    # shellcheck disable=SC2016  # literal $ in nginx map pattern is intended
+    if [[ -f "$NGINX_CONF" ]] && grep -qF 'map $http_cookie $auth_cookie' "$NGINX_CONF" 2>/dev/null; then
+        # shellcheck disable=SC2016
+        line=$(grep -A 3 -F 'map $http_cookie $auth_cookie' "$NGINX_CONF" | grep -E '~\*' | head -n1 || true)
         # ~*NAME=VALUE
         c1=$(printf '%s' "$line" | sed -n 's/.*~\*\([A-Za-z0-9_-]*\)=.*/\1/p')
         c2=$(printf '%s' "$line" | sed -n 's/.*~\*[A-Za-z0-9_-]*=\([A-Za-z0-9_-]*\).*/\1/p')
