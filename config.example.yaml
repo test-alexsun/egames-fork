@@ -1,0 +1,121 @@
+# ============================================================
+# Remnawave eGames Config/Hosts Injector — configuration
+# Copy to config.yaml and fill in real values.
+# ============================================================
+
+# Local API (recommended on panel server). External access needs Cookie + Bearer.
+panel_api_url: "http://127.0.0.1:3000/api"
+
+# Bearer token from Panel → Settings → API Tokens (starts with rwa_ or JWT)
+panel_api_token: "rwa_REPLACE_ME"
+
+# Optional: EGAMES_COOKIE for reverse-proxy protection (name=value)
+# Leave empty when calling localhost:3000 directly.
+egames_cookie: ""
+
+# Target Config Profile name (created/updated if missing)
+profile_name: "eGames-MultiProtocol"
+
+# Optional: force profile UUID instead of looking up by name
+# profile_uuid: ""
+
+# Node UUID that should use this profile (leave empty to auto-pick first online node)
+node_uuid: ""
+
+# Public address used in Hosts (domain or IP of the node)
+host_address: "node.example.com"
+
+# Optional country/region prefix for host remarks
+host_remark_prefix: "EE-ee"
+
+# Internal Squad name that should receive the new inbounds
+internal_squad_name: "Default-Squad"
+
+# Request timeout (seconds)
+timeout: 30
+
+# Dry-run: only log what would be changed, do not write
+dry_run: false
+
+# Detailed logging
+log_level: "INFO"   # DEBUG | INFO | WARN | ERROR
+
+# ------------------------------------------------------------
+# Target inbounds schema
+# Tags MUST be globally unique across all profiles.
+# Reality privateKey / shortIds are generated ONLY when inbound is new.
+# ------------------------------------------------------------
+target_inbounds:
+  - tag: "VLESS-REALITY-VISION"
+    remark: "⚡ VLESS REALITY + Vision"
+    port: 8443
+    protocol: "vless"
+    network: "tcp"
+    security: "reality"
+    flow: "xtls-rprx-vision"
+    # Reality settings filled at runtime if missing
+
+  - tag: "VLESS-WS-TLS"
+    remark: "🌐 VLESS WebSocket + TLS"
+    port: 44205
+    protocol: "vless"
+    network: "ws"
+    security: "tls"
+    path: "/vlessws"
+
+  - tag: "VLESS-XHTTP-TLS"
+    remark: "📡 VLESS XHTTP + TLS (nginx)"
+    port: 0          # behind nginx / unix socket
+    protocol: "vless"
+    network: "xhttp"
+    security: "tls"
+    path: "/xhttp"
+
+  - tag: "VLESS-XHTTP-REALITY"
+    remark: "🛡️ VLESS XHTTP + REALITY"
+    port: 34544
+    protocol: "vless"
+    network: "xhttp"
+    security: "reality"
+    path: "/xhreality"
+
+  - tag: "VLESS-XHTTP-PQ"
+    remark: "🔐 VLESS Encryption (PQ)"
+    port: 34514
+    protocol: "vless"
+    network: "xhttp"
+    security: "reality"
+    path: "/xhpq"
+    # post-quantum flags handled in builder
+
+  - tag: "TROJAN-GRPC-TLS"
+    remark: "🚀 Trojan gRPC + TLS"
+    port: 10399
+    protocol: "trojan"
+    network: "grpc"
+    security: "tls"
+    service_name: "trojangrpc"
+
+  - tag: "VMESS-WS-TLS"
+    remark: "📦 VMess WebSocket + TLS"
+    port: 55574
+    protocol: "vmess"
+    network: "ws"
+    security: "tls"
+    path: "/vmessws"
+
+  - tag: "SS-2022"
+    remark: "🔑 Shadowsocks 2022"
+    port: 15714
+    protocol: "shadowsocks"
+    method: "2022-blake3-aes-128-gcm"
+    network: "tcp"
+    # UDP also enabled in builder
+
+  - tag: "HYSTERIA2-UDP443"
+    remark: "💨 Hysteria2 (UDP 443)"
+    port: 443
+    protocol: "hysteria2"
+    network: "udp"
+    security: "tls"
+    # Note: on eGames node Xray already owns 443; Hysteria2 may share or use alternate

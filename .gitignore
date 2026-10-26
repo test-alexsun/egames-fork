@@ -1,0 +1,8 @@
+config.yaml
+*.pyc
+__pycache__/
+.venv/
+venv/
+.env
+*.log
+.DS_Store
