@@ -1,65 +1,94 @@
 # eGames / Remnawave — Config Profile & Hosts Injector
 
-Полностью автоматический скрипт в стиле eGames: **всё из `config.yaml`, без вопросов**.
+Автоматическое создание **Inbounds** и **Hosts** в панели Remnawave (установка eGames).  
+Всё из `config.yaml`, без интерактивных вопросов. API-форматы — как в официальном eGames `remnawave_api.sh`.
 
-Создаёт/дополняет:
+---
 
-- **Config Profile** (inbounds Xray) через API  
-- **Hosts** с привязкой к inbound  
-- **Node** (`activeConfigProfileUuid` + `activeInbounds`)  
-- **Internal Squad** (список inbounds)
+## Установка на другой сервер (одна команда)
 
-Идемпотентно: повторный запуск не ломает Reality-ключи и не плодит дубликаты.
+На **любом** Linux-сервере (панель или отдельный management-хост):
 
-## Установка
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/test-alexsun/egames-fork/main/install.sh)
+```
+
+Скрипт:
+
+1. Поставит python3 / pip / git  
+2. Скачает injector в `/opt/egames-injector`  
+3. Создаст venv и зависимости  
+4. Положит `config.yaml` из примера  
+5. Добавит команду `egames-injector`  
+
+### После установки
+
+```bash
+nano /opt/egames-injector/config.yaml
+```
+
+Заполните **два обязательных поля**:
+
+```yaml
+panel_api_token: "rwa_ВАШ_ТОКЕН"      # Panel → Settings → API Tokens
+host_address: "node.example.com"      # домен или IP ноды
+```
+
+Если скрипт стоит **не на сервере панели** (удалённый доступ):
+
+```yaml
+panel_api_url: "https://panel.example.com/api"
+egames_cookie: "name=value"           # cookie gate из nginx eGames
+```
+
+Проверка и запуск:
+
+```bash
+egames-injector --dry-run   # только лог
+egames-injector             # создать inbounds + hosts
+```
+
+### Опционально: systemd timer (раз в сутки)
+
+```bash
+cp /opt/egames-injector/egames-injector.service /etc/systemd/system/
+cp /opt/egames-injector/egames-injector.timer   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now egames-injector.timer
+```
+
+---
+
+## Ручная установка
 
 ```bash
 git clone https://github.com/test-alexsun/egames-fork.git
 cd egames-fork
 pip install -r requirements.txt
 cp config.example.yaml config.yaml
-```
-
-В `config.yaml` заполните **только**:
-
-```yaml
-panel_api_token: "rwa_ВАШ_ТОКЕН"
-host_address: "node.example.com"
-```
-
-Остальное уже прописано (9 протоколов, порты, squad, profile name).
-
-## Запуск
-
-На сервере панели (рекомендуется):
-
-```bash
+# отредактировать config.yaml
 python3 remnawave_injector.py -c config.yaml
 ```
 
-Проверка без записи:
+---
 
-```bash
-python3 remnawave_injector.py -c config.yaml --dry-run
-```
+## Что делает injector
 
-Секреты через env (опционально):
+| Шаг | Действие |
+|-----|----------|
+| 1 | Pre-flight API |
+| 2 | Найти/создать Config Profile |
+| 3 | Добавить недостающие inbounds (9 протоколов) |
+| 4 | Сохранить профиль через API |
+| 5 | Создать Hosts (формат eGames) |
+| 6 | Привязать inbounds к Node + Internal Squad |
+| 7 | Verify |
 
-```bash
-export PANEL_API_TOKEN="rwa_..."
-export HOST_ADDRESS="node.example.com"
-python3 remnawave_injector.py -c config.yaml
-```
+Повторный запуск безопасен: существующие Reality-ключи и hosts не сбрасываются.
 
-## API-форматы (как eGames)
+---
 
-- `POST/PATCH /api/config-profiles` — полный Xray JSON  
-- `POST /api/hosts` — `{ inbound: { configProfileUuid, configProfileInboundUuid }, remark, address, port, ... }`  
-- `PATCH /api/internal-squads` — `{ uuid, inbounds: [...] }`  
-- `PATCH /api/nodes/{uuid}` — `{ configProfile: { activeConfigProfileUuid, activeInbounds } }`  
-- `GET /api/system/tools/x25519/generate` — Reality-ключи  
-
-## Целевые inbounds (из config)
+## Целевые inbounds (по умолчанию в config)
 
 | Tag | Port | Тип |
 |-----|------|-----|
@@ -67,10 +96,27 @@ python3 remnawave_injector.py -c config.yaml
 | VLESS-WS-TLS | 44205 | VLESS WS TLS |
 | VLESS-XHTTP-TLS | 10443 | VLESS XHTTP TLS |
 | VLESS-XHTTP-REALITY | 34544 | VLESS XHTTP REALITY |
-| VLESS-XHTTP-PQ | 34514 | VLESS XHTTP REALITY PQ |
+| VLESS-XHTTP-PQ | 34514 | VLESS XHTTP REALITY |
 | TROJAN-GRPC-TLS | 10399 | Trojan gRPC TLS |
 | VMESS-WS-TLS | 55574 | VMess WS TLS |
 | SS-2022 | 15714 | Shadowsocks 2022 |
 | HYSTERIA2 | 36712 | Hysteria2 |
 
-Список и порты меняются только в `config.yaml` → `target_inbounds`.
+Список меняется только в `config.yaml` → `target_inbounds`.
+
+---
+
+## Файлы
+
+| Файл | Назначение |
+|------|------------|
+| `install.sh` | Установщик на сервер |
+| `remnawave_injector.py` | Основной скрипт |
+| `config.example.yaml` | Пример конфига |
+| `requirements.txt` | Python-зависимости |
+
+---
+
+## Лицензия
+
+MIT
