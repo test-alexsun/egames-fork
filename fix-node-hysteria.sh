@@ -18,14 +18,19 @@ info(){ echo -e "${GREEN}[+]${NC} $*"; }
 warn(){ echo -e "${YELLOW}[!]${NC} $*"; }
 err(){ echo -e "${RED}[x]${NC} $*" >&2; }
 
+# curl with headers required by Remnawave ProxyCheckMiddleware (direct :3000 access)
+rcurl() {
+  curl -H "X-Forwarded-For: 127.0.0.1" -H "X-Forwarded-Proto: https" \
+       -H "X-Remnawave-Client-Type: browser" "$@"
+}
+
 need_root() {
   [[ ${EUID} -eq 0 ]] || { err "run as root"; exit 1; }
 }
 
 api_ok() {
   local code
-  code=$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 8 \
-    -H "X-Forwarded-For: 127.0.0.1" -H "X-Forwarded-Proto: https" -H "X-Remnawave-Client-Type: browser" \
+  code=$(rcurl -sS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 8 \
     -H "Authorization: Bearer ${TOKEN}" "${API}/nodes" 2>/dev/null || echo 000)
   [[ "$code" == "200" || "$code" == "201" ]]
 }
@@ -62,7 +67,7 @@ main() {
 
   info "2/4 Find profile: $PROFILE_NAME"
   local list profile_uuid
-  list=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "${API}/config-profiles")
+  list=$(rcurl -sS -H "Authorization: Bearer ${TOKEN}" "${API}/config-profiles")
   profile_uuid=$(printf '%s' "$list" | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
@@ -81,7 +86,7 @@ for p in (ps if isinstance(ps,list) else []):
 
   info "3/4 Remove inbound tag=$TAG_REMOVE"
   local full fixed
-  full=$(curl -sS -H "Authorization: Bearer ${TOKEN}" \
+  full=$(rcurl -sS -H "Authorization: Bearer ${TOKEN}" \
     "${API}/config-profiles/${profile_uuid}")
   fixed=$(printf '%s' "$full" | python3 -c '
 import sys,json
@@ -101,7 +106,7 @@ out={
 print(json.dumps(out))
 sys.stderr.write(f"removed={removed} left={[ib.get(\"tag\") for ib in new]}\n")
 ')
-  curl -sS -X PATCH "${API}/config-profiles" \
+  rcurl -sS -X PATCH "${API}/config-profiles" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$fixed" >/tmp/profile_patch_resp.json

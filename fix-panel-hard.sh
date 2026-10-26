@@ -12,6 +12,12 @@ info(){ echo -e "\033[1;32m[+]\033[0m $*"; }
 warn(){ echo -e "\033[1;33m[!]\033[0m $*"; }
 err(){ echo -e "\033[1;31m[x]\033[0m $*" >&2; }
 
+# curl with headers required by Remnawave ProxyCheckMiddleware (direct :3000 access)
+rcurl() {
+  curl -H "X-Forwarded-For: 127.0.0.1" -H "X-Forwarded-Proto: https" \
+       -H "X-Remnawave-Client-Type: browser" "$@"
+}
+
 [[ ${EUID} -eq 0 ]] || { err "root required"; exit 1; }
 [[ -s "$TOKEN_FILE" ]] || { err "no token $TOKEN_FILE"; exit 1; }
 TOKEN=$(tr -d '\r\n ' < "$TOKEN_FILE")
@@ -32,8 +38,9 @@ docker compose up -d remnawave-nginx remnawave-subscription-page 2>/dev/null || 
 info "Wait API (up to ~2 min)"
 ok=0
 for i in $(seq 1 60); do
-  code=$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 5 \
-    -H "Authorization: Bearer ${TOKEN}" "${API}/nodes" 2>/dev/null || echo 000)
+  code=$(rcurl -sS -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 5 \
+    -H "Authorization: Bearer ${TOKEN}" "${API}/nodes" 2>/dev/null || true)
+  code="${code:-000}"
   if [[ "$code" == "200" ]]; then
     info "API OK (http $code) after ${i} attempts"
     ok=1
@@ -56,7 +63,7 @@ if [[ $ok -ne 1 ]]; then
 fi
 
 info "Remove $TAG_REMOVE from $PROFILE_NAME"
-list=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "${API}/config-profiles")
+list=$(rcurl -sS -H "Authorization: Bearer ${TOKEN}" "${API}/config-profiles")
 profile_uuid=$(printf '%s' "$list" | python3 -c '
 import sys,json
 d=json.load(sys.stdin); r=d.get("response",d)
@@ -69,7 +76,7 @@ for p in (ps if isinstance(ps,list) else []):
 if [[ -z "${profile_uuid:-}" ]]; then
   warn "profile not found — skip strip, start node only"
 else
-  full=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "${API}/config-profiles/${profile_uuid}")
+  full=$(rcurl -sS -H "Authorization: Bearer ${TOKEN}" "${API}/config-profiles/${profile_uuid}")
   fixed=$(printf '%s' "$full" | python3 -c '
 import sys,json
 raw=json.load(sys.stdin); data=raw.get("response",raw)
@@ -79,7 +86,7 @@ cfg["inbounds"]=[ib for ib in old if ib.get("tag")!=tag]
 print(json.dumps({"uuid": data.get("uuid"), "name": data.get("name") or "'"$PROFILE_NAME"'", "config": cfg}))
 sys.stderr.write("left="+str([ib.get("tag") for ib in cfg["inbounds"]])+"\n")
 ')
-  curl -sS -X PATCH "${API}/config-profiles" \
+  rcurl -sS -X PATCH "${API}/config-profiles" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$fixed" >/dev/null
@@ -96,4 +103,4 @@ if docker logs --tail=30 remnanode 2>&1 | grep -qE 'version != 2|XrayProcessDown
 fi
 info "DONE"
 docker logs --tail=10 remnanode 2>&1 | tail -10 || true
-curl -sS -o /dev/null -w "API %{http_code}\n" -H "Authorization: Bearer ${TOKEN}" "${API}/nodes"
+rcurl -sS -o /dev/null -w "API %{http_code}\n" -H "Authorization: Bearer ${TOKEN}" "${API}/nodes"
