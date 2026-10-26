@@ -220,7 +220,7 @@ def build_inbound(
     elif protocol in ("trojan", "vmess", "hysteria2"):
         inbound["settings"] = {"clients": []}
     elif protocol == "shadowsocks":
-        method = spec.get("method", "2022-blake3-aes-128-gcm")
+        method = spec.get("method", "2022-blake3-aes-256-gcm")
         pwd = ""
         if existing and existing.get("settings", {}).get("password"):
             pwd = existing["settings"]["password"]
@@ -254,6 +254,14 @@ def build_inbound(
             "serviceName": spec.get("service_name", tag.lower()),
             "multiMode": False,
         }
+    elif network == "httpupgrade":
+        ss["httpupgradeSettings"] = {
+            "path": spec.get("path", f"/{tag.lower()}"),
+            "host": "",
+        }
+    elif network == "hysteria":
+        # network type hysteria — minimal
+        pass
 
     if security == "reality":
         old = (existing or {}).get("streamSettings", {}).get("realitySettings") or {}
@@ -495,17 +503,19 @@ def activate_node_inbounds(
     inbound_uuids: List[str],
     dry_run: bool,
 ) -> None:
+    # Remnawave: PATCH /api/nodes  with uuid in body (not path)
     body = {
+        "uuid": node_uuid,
         "configProfile": {
             "activeConfigProfileUuid": profile_uuid,
             "activeInbounds": inbound_uuids,
-        }
+        },
     }
     LOG.info("Node %s → profile %s, %d inbounds", node_uuid, profile_uuid, len(inbound_uuids))
     if dry_run:
         return
     try:
-        client.patch(f"/nodes/{node_uuid}", body)
+        client.patch("/nodes", body)
     except RuntimeError as e:
         LOG.warning("Node attach failed: %s", e)
 
