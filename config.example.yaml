@@ -38,6 +38,12 @@ host_remark_prefix: "EE-ee"
 # SNI / serverNames для REALITY (пусто = берётся host_address)
 reality_server_name: ""
 
+# Сертификат для TLS-inbounds (WS/XHTTP/gRPC/HTTPUpgrade). Пути — ВНУТРИ контейнера remnanode
+# (смонтируйте в remnanode: /etc/letsencrypt:/etc/letsencrypt:ro).
+# Без этих значений TLS-inbounds создаются без certificates и работать не будут.
+tls_cert_file: "/etc/letsencrypt/live/sw126-web.alexsun55.ru/fullchain.pem"
+tls_key_file: "/etc/letsencrypt/live/sw126-web.alexsun55.ru/privkey.pem"
+
 # Dest для REALITY (eGames по умолчанию: unix-socket nginx)
 reality_dest: "/dev/shm/nginx.sock"  # fallback: www.cloudflare.com:443
 

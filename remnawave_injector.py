@@ -192,6 +192,8 @@ def build_inbound(
     reality_server_name: str,
     reality_dest: str,
     existing: Optional[Dict] = None,
+    tls_cert_file: str = "",
+    tls_key_file: str = "",
 ) -> Dict[str, Any]:
     tag = spec["tag"]
     protocol = spec["protocol"]
@@ -292,6 +294,15 @@ def build_inbound(
             "serverName": reality_server_name or "",
             "allowInsecure": False,
         }
+        if tls_cert_file and tls_key_file:
+            ss["tlsSettings"]["certificates"] = [
+                {"certificateFile": tls_cert_file, "keyFile": tls_key_file}
+            ]
+        else:
+            LOG.warning(
+                "tag=%s: TLS без certificates (tls_cert_file/tls_key_file не заданы) — "
+                "inbound не сможет принимать TLS", tag,
+            )
 
     if existing and existing.get("settings", {}).get("clients") is not None:
         if "clients" in inbound["settings"]:
@@ -331,6 +342,8 @@ def merge_inbounds(
     reality_short_id: str,
     reality_server_name: str,
     reality_dest: str,
+    tls_cert_file: str = "",
+    tls_key_file: str = "",
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     cfg = copy.deepcopy(current) if current else default_xray_shell()
     if not cfg.get("outbounds"):
@@ -354,6 +367,8 @@ def merge_inbounds(
                 reality_server_name=reality_server_name,
                 reality_dest=reality_dest,
                 existing=None,
+                tls_cert_file=tls_cert_file,
+                tls_key_file=tls_key_file,
             )
         except Exception as e:
             LOG.warning("Skip building tag=%s: %s", tag, e)
@@ -578,6 +593,8 @@ def run(cfg: Dict[str, Any]) -> int:
         reality_short_id=short_id,
         reality_server_name=reality_sni,
         reality_dest=reality_dest,
+        tls_cert_file=(cfg.get("tls_cert_file") or "").strip(),
+        tls_key_file=(cfg.get("tls_key_file") or "").strip(),
     )
     LOG.info("Added=%s Skipped=%s", added, skipped)
 
