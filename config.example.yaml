@@ -32,8 +32,8 @@ internal_squad_name: "Default-Squad"
 # UUID ноды. Пусто = первая доступная нода автоматически
 node_uuid: ""
 
-# Префикс remark для хостов (например страна)
-host_remark_prefix: "EE-ee"
+# Префикс remark для хостов: флаг страны VPS + символ ноды (①, ②, ...)
+host_remark_prefix: "🇪🇪①"
 
 # SNI / serverNames для REALITY (пусто = берётся host_address)
 reality_server_name: ""
@@ -60,7 +60,7 @@ log_level: "INFO"
 # ------------------------------------------------------------
 target_inbounds:
   - tag: "VLESS-REALITY-VISION"
-    remark: "⚡ VLESS REALITY + Vision"
+    remark: "VLESS · Vision · Reality"
     port: 8443
     protocol: "vless"
     network: "raw"
@@ -68,7 +68,7 @@ target_inbounds:
     flow: "xtls-rprx-vision"
 
   - tag: "VLESS-WS-TLS"
-    remark: "🌐 VLESS WebSocket + TLS"
+    remark: "VLESS · WS · TLS"
     port: 44205
     protocol: "vless"
     network: "ws"
@@ -76,7 +76,7 @@ target_inbounds:
     path: "/vlessws"
 
   - tag: "VLESS-XHTTP-TLS"
-    remark: "📡 VLESS XHTTP + TLS"
+    remark: "VLESS · XHTTP · TLS"
     port: 10443
     protocol: "vless"
     network: "xhttp"
@@ -84,7 +84,7 @@ target_inbounds:
     path: "/xhttp"
 
   - tag: "VLESS-XHTTP-REALITY"
-    remark: "🛡️ VLESS XHTTP + REALITY"
+    remark: "VLESS · XHTTP · Reality"
     port: 34544
     protocol: "vless"
     network: "xhttp"
@@ -92,7 +92,7 @@ target_inbounds:
     path: "/xhreality"
 
   - tag: "VLESS-XHTTP-PQ"
-    remark: "🔐 VLESS Encryption (PQ)"
+    remark: "VLESS · XHTTP · Reality PQ"
     port: 34514
     protocol: "vless"
     network: "xhttp"
@@ -100,7 +100,7 @@ target_inbounds:
     path: "/xhpq"
 
   - tag: "TROJAN-GRPC-TLS"
-    remark: "🚀 Trojan gRPC + TLS"
+    remark: "Trojan · gRPC · TLS"
     port: 10399
     protocol: "trojan"
     network: "grpc"
@@ -108,7 +108,7 @@ target_inbounds:
     service_name: "trojangrpc"
 
   - tag: "VLESS-HTTPUPGRADE-TLS"
-    remark: "📦 VLESS HTTPUpgrade + TLS"
+    remark: "VLESS · HTTPUpgrade · TLS"
     port: 55574
     protocol: "vless"
     network: "httpupgrade"
@@ -116,7 +116,7 @@ target_inbounds:
     path: "/vlesshu"
 
   - tag: "SS-2022"
-    remark: "🔑 Shadowsocks 2022"
+    remark: "Shadowsocks · TCP/UDP · 2022"
     port: 15714
     protocol: "shadowsocks"
     method: "2022-blake3-aes-256-gcm"
