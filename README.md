@@ -154,3 +154,15 @@ systemctl enable --now egames-injector.timer
 ## Лицензия
 
 MIT
+
+---
+
+## Восстановление ноды (crash loop из‑за Hysteria)
+
+Если Xray на ноде падает с `version != 2` / `HYSTERIA2`:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/test-alexsun/egames-fork/main/fix-node-hysteria.sh)
+```
+
+Скрипт: останавливает `remnanode` → ждёт API → удаляет inbound `HYSTERIA2` из профиля → запускает ноду.

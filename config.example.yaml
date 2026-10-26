@@ -116,9 +116,3 @@ target_inbounds:
     method: "2022-blake3-aes-256-gcm"
     network: "raw"
 
-  - tag: "HYSTERIA2"
-    remark: "💨 Hysteria2"
-    port: 36712
-    protocol: "hysteria"
-    network: "hysteria"
-    security: "tls"
