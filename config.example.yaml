@@ -32,8 +32,10 @@ internal_squad_name: "Default-Squad"
 # UUID ноды. Пусто = первая доступная нода автоматически
 node_uuid: ""
 
-# Префикс remark для хостов: флаг страны VPS + символ ноды (①, ②, ...)
-host_remark_prefix: "🇪🇪①"
+# Префикс remark для хостов: флаг страны VPS + символ ноды (①, ②, ...).
+# 🏳 — заглушка: замените на флаг страны, где физически находится VPS
+# (или запустите fix-host-names.py: он определит страну по IP сервера сам).
+host_remark_prefix: "🏳①"
 
 # SNI / serverNames для REALITY (пусто = берётся host_address)
 reality_server_name: ""

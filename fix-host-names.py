@@ -9,7 +9,8 @@ uuids, node/squad links and disabled hosts are untouched.
 
     python3 fix-host-names.py                 # dry-run: backup + plan
     python3 fix-host-names.py --apply
-Env: FLAG (default 🇪🇪), NODE_MARK (default ①), TOKEN_FILE, API, BACKUP_DIR
+Env: FLAG (default: auto-detected from the VPS public IP), NODE_MARK (default ①),
+     TOKEN_FILE, API, BACKUP_DIR
 """
 import argparse
 import json
@@ -19,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 
-FLAG = os.environ.get("FLAG", "🇪🇪")
+FLAG = os.environ.get("FLAG", "")  # empty = auto-detect from this server's public IP
 NODE_MARK = os.environ.get("NODE_MARK", "①")
 TOKEN_FILE = os.environ.get("TOKEN_FILE", "/usr/local/remnawave_reverse/token")
 API = os.environ.get("API", "http://127.0.0.1:3000/api").rstrip("/")
@@ -36,6 +37,29 @@ NAMES = {  # inbound tag -> (protocol, transport, security)
     "SS-2022": ("Shadowsocks", "TCP/UDP", "2022"),
 }
 TOKEN = open(TOKEN_FILE).read().strip()
+
+
+GEO_SOURCES = [  # (url, kind) — queried from the VPS, so they see its own public IP
+    ("https://ipinfo.io/country", "text"),
+    ("https://api.country.is/", "json:country"),
+    ("https://api.db-ip.com/v2/free/self", "json:countryCode"),
+]
+
+
+def detect_flag():
+    """Country of the VPS public IP -> flag emoji. Returns (flag, cc, source) or exits."""
+    for url, kind in GEO_SOURCES:
+        try:
+            with urllib.request.urlopen(
+                    urllib.request.Request(url, headers={"User-Agent": "curl/8"}), timeout=8) as r:
+                body = r.read().decode().strip()
+            cc = body if kind == "text" else json.loads(body).get(kind.split(":")[1], "")
+            cc = cc.strip().upper()
+            if len(cc) == 2 and cc.isalpha():
+                return "".join(chr(0x1F1E6 + ord(c) - 65) for c in cc), cc, url
+        except Exception:
+            continue
+    sys.exit("could not detect the country of this server; set FLAG=🇪🇪 (your flag) explicitly")
 
 
 def call(method, path, body=None):
@@ -58,6 +82,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     args = ap.parse_args()
+
+    flag = FLAG
+    if not flag:
+        flag, cc, src = detect_flag()
+        print(f"[+] server country: {cc} {flag} (source: {src}); override with FLAG=...")
 
     profs = call("GET", "/config-profiles")
     profs = profs.get("configProfiles", profs) if isinstance(profs, dict) else profs
@@ -82,7 +111,7 @@ def main():
             print(f"[?] skip '{h.get('remark')}' (inbound tag: {tag})")
             continue
         proto, transport, sec = NAMES[tag]
-        new = f"{FLAG}{NODE_MARK} | {proto} · {transport} · {sec} · {h.get('port')}"
+        new = f"{flag}{NODE_MARK} | {proto} · {transport} · {sec} · {h.get('port')}"
         if new != h.get("remark"):
             plan.append((h, new))
 
