@@ -1,49 +1,51 @@
 # ============================================================
-# Remnawave eGames Config/Hosts Injector — configuration
-# Copy to config.yaml and fill in real values.
+# Remnawave eGames Injector — всё в одном файле
+# Скопируйте:  cp config.example.yaml config.yaml
+# Заполните только обязательные поля ниже.
 # ============================================================
 
-# Local API (recommended on panel server). External access needs Cookie + Bearer.
-panel_api_url: "http://127.0.0.1:3000/api"
-
-# Bearer token from Panel → Settings → API Tokens (starts with rwa_ or JWT)
+# --- ОБЯЗАТЕЛЬНО ---
+# Bearer-токен панели (Settings → API Tokens). Можно rwa_... или JWT.
 panel_api_token: "rwa_REPLACE_ME"
 
-# Optional: EGAMES_COOKIE for reverse-proxy protection (name=value)
-# Leave empty when calling localhost:3000 directly.
-egames_cookie: ""
-
-# Target Config Profile name (created/updated if missing)
-profile_name: "eGames-MultiProtocol"
-
-# Optional: force profile UUID instead of looking up by name
-# profile_uuid: ""
-
-# Node UUID that should use this profile (leave empty to auto-pick first online node)
-node_uuid: ""
-
-# Public address used in Hosts (domain or IP of the node)
+# Публичный адрес ноды (домен или IP) — пойдёт в Hosts
 host_address: "node.example.com"
 
-# Optional country/region prefix for host remarks
-host_remark_prefix: "EE-ee"
+# --- Обычно менять не нужно ---
+# Локальный API на сервере панели (как в eGames)
+panel_api_url: "http://127.0.0.1:3000/api"
 
-# Internal Squad name that should receive the new inbounds
+# Cookie gate eGames (name=value). Пусто = localhost без cookie.
+egames_cookie: ""
+
+# Имя Config Profile (создастся, если нет)
+profile_name: "eGames-MultiProtocol"
+
+# Имя Internal Squad (inbounds добавятся в него)
 internal_squad_name: "Default-Squad"
 
-# Request timeout (seconds)
+# UUID ноды. Пусто = первая доступная нода автоматически
+node_uuid: ""
+
+# Префикс remark для хостов (например страна)
+host_remark_prefix: "EE-ee"
+
+# SNI / serverNames для REALITY (пусто = берётся host_address)
+reality_server_name: ""
+
+# Dest для REALITY (eGames по умолчанию: unix-socket nginx)
+reality_dest: "/dev/shm/nginx.sock"
+
+# Таймаут HTTP
 timeout: 30
 
-# Dry-run: only log what would be changed, do not write
+# true = только лог, без записи
 dry_run: false
 
-# Detailed logging
-log_level: "INFO"   # DEBUG | INFO | WARN | ERROR
+log_level: "INFO"
 
 # ------------------------------------------------------------
-# Target inbounds schema
-# Tags MUST be globally unique across all profiles.
-# Reality privateKey / shortIds are generated ONLY when inbound is new.
+# Целевые inbounds. Всё прописано здесь — скрипт ничего не спрашивает.
 # ------------------------------------------------------------
 target_inbounds:
   - tag: "VLESS-REALITY-VISION"
@@ -53,7 +55,6 @@ target_inbounds:
     network: "tcp"
     security: "reality"
     flow: "xtls-rprx-vision"
-    # Reality settings filled at runtime if missing
 
   - tag: "VLESS-WS-TLS"
     remark: "🌐 VLESS WebSocket + TLS"
@@ -64,8 +65,8 @@ target_inbounds:
     path: "/vlessws"
 
   - tag: "VLESS-XHTTP-TLS"
-    remark: "📡 VLESS XHTTP + TLS (nginx)"
-    port: 0          # behind nginx / unix socket
+    remark: "📡 VLESS XHTTP + TLS"
+    port: 10443
     protocol: "vless"
     network: "xhttp"
     security: "tls"
@@ -86,7 +87,6 @@ target_inbounds:
     network: "xhttp"
     security: "reality"
     path: "/xhpq"
-    # post-quantum flags handled in builder
 
   - tag: "TROJAN-GRPC-TLS"
     remark: "🚀 Trojan gRPC + TLS"
@@ -110,12 +110,10 @@ target_inbounds:
     protocol: "shadowsocks"
     method: "2022-blake3-aes-128-gcm"
     network: "tcp"
-    # UDP also enabled in builder
 
-  - tag: "HYSTERIA2-UDP443"
-    remark: "💨 Hysteria2 (UDP 443)"
-    port: 443
+  - tag: "HYSTERIA2"
+    remark: "💨 Hysteria2"
+    port: 36712
     protocol: "hysteria2"
     network: "udp"
     security: "tls"
-    # Note: on eGames node Xray already owns 443; Hysteria2 may share or use alternate
