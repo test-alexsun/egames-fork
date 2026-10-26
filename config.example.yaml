@@ -34,7 +34,7 @@ host_remark_prefix: "EE-ee"
 reality_server_name: ""
 
 # Dest для REALITY (eGames по умолчанию: unix-socket nginx)
-reality_dest: "/dev/shm/nginx.sock"
+reality_dest: "/dev/shm/nginx.sock"  # fallback: www.cloudflare.com:443
 
 # Таймаут HTTP
 timeout: 30
@@ -52,7 +52,7 @@ target_inbounds:
     remark: "⚡ VLESS REALITY + Vision"
     port: 8443
     protocol: "vless"
-    network: "tcp"
+    network: "raw"
     security: "reality"
     flow: "xtls-rprx-vision"
 
@@ -109,7 +109,7 @@ target_inbounds:
     port: 15714
     protocol: "shadowsocks"
     method: "2022-blake3-aes-128-gcm"
-    network: "tcp"
+    network: "raw"
 
   - tag: "HYSTERIA2"
     remark: "💨 Hysteria2"

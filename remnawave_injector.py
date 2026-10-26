@@ -143,6 +143,7 @@ class RemnawaveClient:
 # Build Xray inbound (совместимо с eGames create_config_profile)
 # ---------------------------------------------------------------------------
 
+
 def build_inbound(
     spec: Dict[str, Any],
     *,
@@ -152,10 +153,14 @@ def build_inbound(
     reality_dest: str,
     existing: Optional[Dict] = None,
 ) -> Dict[str, Any]:
+    """Xray inbound in formats accepted by Remnawave validator (eGames-compatible)."""
     tag = spec["tag"]
     protocol = spec["protocol"]
-    port = int(spec.get("port") or 0)
-    network = spec.get("network", "tcp")
+    port = int(spec.get("port") or 443)
+    network = spec.get("network", "raw")
+    # newer Xray uses "raw" instead of "tcp"
+    if network == "tcp":
+        network = "raw"
     security = spec.get("security", "none")
 
     inbound: Dict[str, Any] = {
@@ -169,10 +174,10 @@ def build_inbound(
         },
         "streamSettings": {
             "network": network,
-            "security": security if security != "none" else "none",
         },
     }
 
+    # ----- protocol settings -----
     if protocol == "vless":
         inbound["settings"] = {"clients": [], "decryption": "none"}
     elif protocol == "trojan":
@@ -180,18 +185,39 @@ def build_inbound(
     elif protocol == "vmess":
         inbound["settings"] = {"clients": []}
     elif protocol == "shadowsocks":
+        # 2022 methods require a password (key). Generate if new.
+        method = spec.get("method", "2022-blake3-aes-128-gcm")
+        import base64
+        pwd = ""
+        if existing and existing.get("settings", {}).get("password"):
+            pwd = existing["settings"]["password"]
+        else:
+            # 16 bytes for aes-128, 32 for aes-256
+            n = 16 if "128" in method else 32
+            pwd = base64.b64encode(secrets.token_bytes(n)).decode()
         inbound["settings"] = {
-            "method": spec.get("method", "2022-blake3-aes-128-gcm"),
-            "password": "",
+            "method": method,
+            "password": pwd,
             "network": "tcp,udp",
+            "clients": [],
         }
     elif protocol == "hysteria2":
+        # Server-side HY2 is limited in Remnawave; keep minimal shape
         inbound["settings"] = {"clients": []}
 
     ss = inbound["streamSettings"]
 
+    if security and security != "none":
+        ss["security"] = security
+    else:
+        # omit security field when none — some validators dislike "none"
+        pass
+
     if network == "ws":
-        ss["wsSettings"] = {"path": spec.get("path", f"/{tag.lower()}"), "headers": {}}
+        ss["wsSettings"] = {
+            "path": spec.get("path", f"/{tag.lower()}"),
+            "headers": {},
+        }
     elif network == "xhttp":
         ss["xhttpSettings"] = {
             "path": spec.get("path", f"/{tag.lower()}"),
@@ -203,26 +229,32 @@ def build_inbound(
             "serviceName": spec.get("service_name", tag.lower()),
             "multiMode": False,
         }
-    elif network == "tcp":
-        ss["tcpSettings"] = {"header": {"type": "none"}}
+    elif network == "raw":
+        # optional header — eGames often omits tcpSettings for reality
+        pass
 
     if security == "reality":
-        # Preserve keys if inbound already existed
         old = (existing or {}).get("streamSettings", {}).get("realitySettings") or {}
         priv = old.get("privateKey") or reality_private_key
         shorts = old.get("shortIds") or [reality_short_id]
-        sni = old.get("serverNames") or [reality_server_name]
-        dest = old.get("dest") or reality_dest
-        ss["realitySettings"] = {
+        sni_list = old.get("serverNames") or [reality_server_name]
+        dest = old.get("dest") or old.get("target") or reality_dest
+        # eGames uses dest + xver for unix socket; some configs use target
+        reality: Dict[str, Any] = {
             "show": False,
-            "xver": 1 if str(dest).startswith("/") else 0,
-            "dest": dest,
-            "spiderX": "",
-            "minClientVer": "0.0.0",
             "shortIds": shorts,
             "privateKey": priv,
-            "serverNames": sni,
+            "serverNames": sni_list,
+            "spiderX": "",
         }
+        if str(dest).startswith("/"):
+            reality["dest"] = dest
+            reality["xver"] = 1
+        else:
+            # host:port style — prefer target (newer) with dest fallback
+            reality["dest"] = dest if ":" in str(dest) else f"{dest}:443"
+            reality["xver"] = 0
+        ss["realitySettings"] = reality
         if old.get("privateKey"):
             LOG.info("Preserve Reality keys for tag=%s", tag)
         else:
@@ -231,22 +263,24 @@ def build_inbound(
         ss["tlsSettings"] = {
             "serverName": reality_server_name or "",
             "allowInsecure": False,
-            "alpn": ["h2", "http/1.1"],
         }
 
     if existing and existing.get("settings", {}).get("clients") is not None:
-        inbound["settings"]["clients"] = existing["settings"]["clients"]
+        if "clients" in inbound["settings"]:
+            inbound["settings"]["clients"] = existing["settings"]["clients"]
 
     return inbound
 
 
 def default_xray_shell() -> Dict[str, Any]:
-    """Базовый каркас конфига как в eGames create_config_profile."""
+    """Minimal valid shell matching eGames create_config_profile."""
     return {
         "log": {"loglevel": "warning"},
         "dns": {
             "queryStrategy": "UseIPv4",
-            "servers": [{"address": "https://dns.google/dns-query", "skipFallback": False}],
+            "servers": [
+                {"address": "https://dns.google/dns-query", "skipFallback": False}
+            ],
         },
         "inbounds": [],
         "outbounds": [
@@ -262,32 +296,6 @@ def default_xray_shell() -> Dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------------
-
-def unwrap_list(data: Any, *keys: str) -> List[Dict]:
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for k in keys:
-            if k in data and isinstance(data[k], list):
-                return data[k]
-    return []
-
-
-def find_profile(client: RemnawaveClient, name: str) -> Optional[Dict]:
-    data = client.get("/config-profiles")
-    for p in unwrap_list(data, "configProfiles", "items"):
-        if p.get("name") == name:
-            return p
-    return None
-
-
-def get_profile(client: RemnawaveClient, uuid: str) -> Dict:
-    return client.get(f"/config-profiles/{uuid}")
-
-
 def merge_inbounds(
     current: Dict[str, Any],
     specs: List[Dict],
@@ -298,6 +306,8 @@ def merge_inbounds(
     reality_dest: str,
 ) -> Tuple[Dict[str, Any], List[str], List[str]]:
     cfg = copy.deepcopy(current) if current else default_xray_shell()
+    if not cfg.get("outbounds"):
+        cfg["outbounds"] = default_xray_shell()["outbounds"]
     if "inbounds" not in cfg or not isinstance(cfg["inbounds"], list):
         cfg["inbounds"] = []
     by_tag = {ib.get("tag"): ib for ib in cfg["inbounds"] if ib.get("tag")}
@@ -309,18 +319,29 @@ def merge_inbounds(
             LOG.info("Inbound tag=%s already exists — keep", tag)
             skipped.append(tag)
             continue
-        ib = build_inbound(
-            spec,
-            reality_private_key=reality_private_key,
-            reality_short_id=reality_short_id,
-            reality_server_name=reality_server_name,
-            reality_dest=reality_dest,
-            existing=None,
-        )
+        try:
+            ib = build_inbound(
+                spec,
+                reality_private_key=reality_private_key,
+                reality_short_id=reality_short_id,
+                reality_server_name=reality_server_name,
+                reality_dest=reality_dest,
+                existing=None,
+            )
+        except Exception as e:
+            LOG.warning("Skip building tag=%s: %s", tag, e)
+            continue
         cfg["inbounds"].append(ib)
         added.append(tag)
-        LOG.info("Add inbound tag=%s port=%s protocol=%s", tag, ib["port"], ib["protocol"])
+        LOG.info(
+            "Add inbound tag=%s port=%s protocol=%s network=%s",
+            tag,
+            ib.get("port"),
+            ib.get("protocol"),
+            ib.get("streamSettings", {}).get("network"),
+        )
     return cfg, added, skipped
+
 
 
 def push_profile(
@@ -343,11 +364,49 @@ def push_profile(
             res = client.put(f"/config-profiles/{uuid}", body)
         return (res or {}).get("uuid") or uuid
 
-    res = client.post("/config-profiles", {"name": name, "config": config})
+    # Create: if full config rejected, try eGames-minimal then add one-by-one
+    try:
+        res = client.post("/config-profiles", {"name": name, "config": config})
+        new_uuid = (res or {}).get("uuid")
+        if not new_uuid:
+            raise RuntimeError(f"Create profile failed: {res}")
+        LOG.info("Created profile uuid=%s", new_uuid)
+        return new_uuid
+    except RuntimeError as e:
+        LOG.warning("Full profile rejected (%s) — fallback: minimal + incremental", e)
+
+    # Minimal: first inbound only (or empty shadowsocks-like)
+    inbounds = list(config.get("inbounds") or [])
+    if not inbounds:
+        raise RuntimeError("No inbounds to create")
+
+    minimal = copy.deepcopy(config)
+    minimal["inbounds"] = [inbounds[0]]
+    res = client.post("/config-profiles", {"name": name, "config": minimal})
     new_uuid = (res or {}).get("uuid")
     if not new_uuid:
-        raise RuntimeError(f"Create profile failed: {res}")
-    LOG.info("Created profile uuid=%s", new_uuid)
+        raise RuntimeError(f"Even minimal profile failed: {res}")
+    LOG.info("Created minimal profile uuid=%s with tag=%s", new_uuid, inbounds[0].get("tag"))
+
+    # Add remaining one by one
+    for ib in inbounds[1:]:
+        try:
+            full = get_profile(client, new_uuid)
+            cfg = full.get("config") or minimal
+            tags = {x.get("tag") for x in (cfg.get("inbounds") or [])}
+            if ib.get("tag") in tags:
+                continue
+            cfg = copy.deepcopy(cfg)
+            cfg.setdefault("inbounds", []).append(ib)
+            body = {"uuid": new_uuid, "name": name, "config": cfg}
+            try:
+                client.patch("/config-profiles", body)
+            except RuntimeError:
+                client.put(f"/config-profiles/{new_uuid}", body)
+            LOG.info("Added inbound tag=%s", ib.get("tag"))
+        except Exception as ex:
+            LOG.warning("Could not add tag=%s: %s (continue)", ib.get("tag"), ex)
+
     return new_uuid
 
 
