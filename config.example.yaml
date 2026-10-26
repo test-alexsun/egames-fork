@@ -1,8 +1,13 @@
 # ============================================================
-# Remnawave eGames Injector — всё в одном файле
-# Скопируйте:  cp config.example.yaml config.yaml
-# Заполните только обязательные поля ниже.
+# eGames / Remnawave Injector — config.example.yaml
+#
+# На сервере с eGames install.sh сам подставит:
+#   panel_api_token, host_address, egames_cookie, reality_*
+# из /usr/local/remnawave_reverse/token и /opt/remnawave/.env
+#
+# Протоколы соответствуют ограничениям Remnawave API (A061).
 # ============================================================
+
 
 # --- ОБЯЗАТЕЛЬНО ---
 # Bearer-токен панели (Settings → API Tokens). Можно rwa_... или JWT.
