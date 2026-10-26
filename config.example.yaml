@@ -42,9 +42,11 @@ reality_server_name: ""
 
 # Сертификат для TLS-inbounds (WS/XHTTP/gRPC/HTTPUpgrade). Пути — ВНУТРИ контейнера remnanode
 # (смонтируйте в remnanode: /etc/letsencrypt:/etc/letsencrypt:ro).
-# Без этих значений TLS-inbounds создаются без certificates и работать не будут.
-tls_cert_file: "/etc/letsencrypt/live/sw126-web.alexsun55.ru/fullchain.pem"
-tls_key_file: "/etc/letsencrypt/live/sw126-web.alexsun55.ru/privkey.pem"
+# ВАЖНО: оставьте пустыми при первой установке — fix-tls-certs.py сначала смонтирует
+# сертификаты в remnanode и только потом пропишет пути (иначе Xray не стартует и нода ляжет).
+# Без этих значений TLS-inbounds создаются без certificates и до fix-tls-certs.py не работают.
+tls_cert_file: ""
+tls_key_file: ""
 
 # Dest для REALITY (eGames по умолчанию: unix-socket nginx)
 reality_dest: "/dev/shm/nginx.sock"  # fallback: www.cloudflare.com:443

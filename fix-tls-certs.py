@@ -11,7 +11,7 @@ when a certificateFile is missing):
 Usage (on the VPS, as root):
     python3 fix-tls-certs.py            # dry-run: shows what would be changed
     python3 fix-tls-certs.py --apply
-Env: COMPOSE_DIR, CERT_DOMAIN, PROFILE, TOKEN_FILE, API
+Env: COMPOSE_DIR, CERT_DOMAIN (default: SNI of the TLS inbounds), PROFILE, TOKEN_FILE, API
 """
 import argparse
 import json
@@ -24,15 +24,14 @@ import urllib.error
 import urllib.request
 
 COMPOSE_DIR = os.environ.get("COMPOSE_DIR", "/opt/remnawave")
-DOMAIN = os.environ.get("CERT_DOMAIN", "sw126-web.alexsun55.ru")
+DOMAIN = os.environ.get("CERT_DOMAIN", "")  # empty = serverName of the first TLS inbound
 PROFILE = os.environ.get("PROFILE", "eGames-MultiProtocol")
 TOKEN_FILE = os.environ.get("TOKEN_FILE", "/usr/local/remnawave_reverse/token")
 API = os.environ.get("API", "http://127.0.0.1:3000/api").rstrip("/")
 BACKUP_DIR = os.environ.get("BACKUP_DIR", "/root/remnawave-backup")
 MOUNT_LINE = "/etc/letsencrypt:/etc/letsencrypt:ro"
 ANCHOR = "./xray-custom:/usr/local/bin/xray"
-CERT = f"/etc/letsencrypt/live/{DOMAIN}/fullchain.pem"
-KEY = f"/etc/letsencrypt/live/{DOMAIN}/privkey.pem"
+CERT = KEY = ""  # set in main() once the domain is known
 TOKEN = open(TOKEN_FILE).read().strip()
 
 
@@ -74,13 +73,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
+    global DOMAIN, CERT, KEY
 
-    if not os.path.exists(f"/etc/letsencrypt/live/{DOMAIN}/fullchain.pem"):
-        sys.exit(f"no certificate on host for {DOMAIN}")
     prof = get_profile()
     if not prof:
         sys.exit(f"profile {PROFILE} not found")
     cfg = prof["config"]
+    if not DOMAIN:
+        DOMAIN = next(((ib["streamSettings"].get("tlsSettings") or {}).get("serverName")
+                       for ib in tls_inbounds(cfg)
+                       if (ib["streamSettings"].get("tlsSettings") or {}).get("serverName")), "")
+        if not DOMAIN:
+            sys.exit("cannot detect certificate domain; set CERT_DOMAIN=<domain>")
+    CERT = f"/etc/letsencrypt/live/{DOMAIN}/fullchain.pem"
+    KEY = f"/etc/letsencrypt/live/{DOMAIN}/privkey.pem"
+    print(f"[i] certificate domain: {DOMAIN}")
+
+    if not os.path.exists(f"/etc/letsencrypt/live/{DOMAIN}/fullchain.pem"):
+        sys.exit(f"no certificate on host for {DOMAIN}")
     todo = [ib for ib in tls_inbounds(cfg)
             if not ((ib["streamSettings"].get("tlsSettings") or {}).get("certificates"))]
     ports = sorted({ib["port"] for ib in tls_inbounds(cfg)})
