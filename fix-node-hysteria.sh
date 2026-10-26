@@ -25,6 +25,7 @@ need_root() {
 api_ok() {
   local code
   code=$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 8 \
+    -H "X-Forwarded-For: 127.0.0.1" -H "X-Forwarded-Proto: https" -H "X-Remnawave-Client-Type: browser" \
     -H "Authorization: Bearer ${TOKEN}" "${API}/nodes" 2>/dev/null || echo 000)
   [[ "$code" == "200" || "$code" == "201" ]]
 }
