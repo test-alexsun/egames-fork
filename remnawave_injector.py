@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 Remnawave eGames Config/Hosts Injector
-Полностью автоматический, как eGames-скрипт: всё из config.yaml, без вопросов.
-Создаёт/дополняет Config Profile (inbounds), Hosts, привязывает к Node и Squad.
+Полностью автоматический: всё из config.yaml.
+Создаёт Config Profile (inbounds), Hosts, привязывает к Node и Squad.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
-import json
 import logging
 import os
 import secrets
@@ -41,7 +41,7 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 # ---------------------------------------------------------------------------
-# API client (формат как в eGames remnawave_api.sh)
+# API client
 # ---------------------------------------------------------------------------
 
 class RemnawaveClient:
@@ -64,8 +64,13 @@ class RemnawaveClient:
     def _url(self, path: str) -> str:
         return f"{self.base}{path if path.startswith('/') else '/' + path}"
 
-    def request(self, method: str, path: str, body: Optional[Dict] = None,
-                expected: Tuple[int, ...] = (200, 201, 204)) -> Any:
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[Dict] = None,
+        expected: Tuple[int, ...] = (200, 201, 204),
+    ) -> Any:
         url = self._url(path)
         LOG.debug("%s %s", method, url)
         try:
@@ -105,7 +110,6 @@ class RemnawaveClient:
         return False
 
     def generate_x25519(self) -> Tuple[str, str]:
-        """Как eGames: GET /api/system/tools/x25519/generate"""
         try:
             data = self.get("/system/tools/x25519/generate")
             kps = data.get("keypairs") or []
@@ -116,11 +120,10 @@ class RemnawaveClient:
                     return priv, pub
         except Exception as e:
             LOG.warning("Panel keygen unavailable (%s), local fallback", e)
-        # local fallback
         try:
             from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
             from cryptography.hazmat.primitives import serialization
-            import base64
+
             priv_obj = X25519PrivateKey.generate()
             priv_b = priv_obj.private_bytes(
                 encoding=serialization.Encoding.Raw,
@@ -140,9 +143,46 @@ class RemnawaveClient:
 
 
 # ---------------------------------------------------------------------------
-# Build Xray inbound (совместимо с eGames create_config_profile)
+# Helpers
 # ---------------------------------------------------------------------------
 
+def unwrap_list(data: Any, *keys: str) -> List[Dict]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in keys:
+            if k in data and isinstance(data[k], list):
+                return data[k]
+    return []
+
+
+def find_profile(client: RemnawaveClient, name: str) -> Optional[Dict]:
+    data = client.get("/config-profiles")
+    for p in unwrap_list(data, "configProfiles", "items"):
+        if p.get("name") == name:
+            return p
+    return None
+
+
+def get_profile(client: RemnawaveClient, uuid: str) -> Dict:
+    return client.get(f"/config-profiles/{uuid}")
+
+
+def list_hosts(client: RemnawaveClient) -> List[Dict]:
+    return unwrap_list(client.get("/hosts"), "hosts", "items")
+
+
+def list_nodes(client: RemnawaveClient) -> List[Dict]:
+    return unwrap_list(client.get("/nodes"), "nodes", "items")
+
+
+def list_squads(client: RemnawaveClient) -> List[Dict]:
+    return unwrap_list(client.get("/internal-squads"), "internalSquads", "items")
+
+
+# ---------------------------------------------------------------------------
+# Xray builders (eGames / Remnawave validator compatible)
+# ---------------------------------------------------------------------------
 
 def build_inbound(
     spec: Dict[str, Any],
@@ -153,12 +193,10 @@ def build_inbound(
     reality_dest: str,
     existing: Optional[Dict] = None,
 ) -> Dict[str, Any]:
-    """Xray inbound in formats accepted by Remnawave validator (eGames-compatible)."""
     tag = spec["tag"]
     protocol = spec["protocol"]
     port = int(spec.get("port") or 443)
     network = spec.get("network", "raw")
-    # newer Xray uses "raw" instead of "tcp"
     if network == "tcp":
         network = "raw"
     security = spec.get("security", "none")
@@ -177,22 +215,16 @@ def build_inbound(
         },
     }
 
-    # ----- protocol settings -----
     if protocol == "vless":
         inbound["settings"] = {"clients": [], "decryption": "none"}
-    elif protocol == "trojan":
-        inbound["settings"] = {"clients": []}
-    elif protocol == "vmess":
+    elif protocol in ("trojan", "vmess", "hysteria2"):
         inbound["settings"] = {"clients": []}
     elif protocol == "shadowsocks":
-        # 2022 methods require a password (key). Generate if new.
         method = spec.get("method", "2022-blake3-aes-128-gcm")
-        import base64
         pwd = ""
         if existing and existing.get("settings", {}).get("password"):
             pwd = existing["settings"]["password"]
         else:
-            # 16 bytes for aes-128, 32 for aes-256
             n = 16 if "128" in method else 32
             pwd = base64.b64encode(secrets.token_bytes(n)).decode()
         inbound["settings"] = {
@@ -201,17 +233,10 @@ def build_inbound(
             "network": "tcp,udp",
             "clients": [],
         }
-    elif protocol == "hysteria2":
-        # Server-side HY2 is limited in Remnawave; keep minimal shape
-        inbound["settings"] = {"clients": []}
 
     ss = inbound["streamSettings"]
-
     if security and security != "none":
         ss["security"] = security
-    else:
-        # omit security field when none — some validators dislike "none"
-        pass
 
     if network == "ws":
         ss["wsSettings"] = {
@@ -229,9 +254,6 @@ def build_inbound(
             "serviceName": spec.get("service_name", tag.lower()),
             "multiMode": False,
         }
-    elif network == "raw":
-        # optional header — eGames often omits tcpSettings for reality
-        pass
 
     if security == "reality":
         old = (existing or {}).get("streamSettings", {}).get("realitySettings") or {}
@@ -239,7 +261,6 @@ def build_inbound(
         shorts = old.get("shortIds") or [reality_short_id]
         sni_list = old.get("serverNames") or [reality_server_name]
         dest = old.get("dest") or old.get("target") or reality_dest
-        # eGames uses dest + xver for unix socket; some configs use target
         reality: Dict[str, Any] = {
             "show": False,
             "shortIds": shorts,
@@ -251,7 +272,6 @@ def build_inbound(
             reality["dest"] = dest
             reality["xver"] = 1
         else:
-            # host:port style — prefer target (newer) with dest fallback
             reality["dest"] = dest if ":" in str(dest) else f"{dest}:443"
             reality["xver"] = 0
         ss["realitySettings"] = reality
@@ -273,7 +293,6 @@ def build_inbound(
 
 
 def default_xray_shell() -> Dict[str, Any]:
-    """Minimal valid shell matching eGames create_config_profile."""
     return {
         "log": {"loglevel": "warning"},
         "dns": {
@@ -343,7 +362,6 @@ def merge_inbounds(
     return cfg, added, skipped
 
 
-
 def push_profile(
     client: RemnawaveClient,
     *,
@@ -364,7 +382,6 @@ def push_profile(
             res = client.put(f"/config-profiles/{uuid}", body)
         return (res or {}).get("uuid") or uuid
 
-    # Create: if full config rejected, try eGames-minimal then add one-by-one
     try:
         res = client.post("/config-profiles", {"name": name, "config": config})
         new_uuid = (res or {}).get("uuid")
@@ -375,7 +392,6 @@ def push_profile(
     except RuntimeError as e:
         LOG.warning("Full profile rejected (%s) — fallback: minimal + incremental", e)
 
-    # Minimal: first inbound only (or empty shadowsocks-like)
     inbounds = list(config.get("inbounds") or [])
     if not inbounds:
         raise RuntimeError("No inbounds to create")
@@ -388,7 +404,6 @@ def push_profile(
         raise RuntimeError(f"Even minimal profile failed: {res}")
     LOG.info("Created minimal profile uuid=%s with tag=%s", new_uuid, inbounds[0].get("tag"))
 
-    # Add remaining one by one
     for ib in inbounds[1:]:
         try:
             full = get_profile(client, new_uuid)
@@ -410,10 +425,6 @@ def push_profile(
     return new_uuid
 
 
-def list_hosts(client: RemnawaveClient) -> List[Dict]:
-    return unwrap_list(client.get("/hosts"), "hosts", "items")
-
-
 def ensure_host(
     client: RemnawaveClient,
     *,
@@ -424,15 +435,16 @@ def ensure_host(
     inbound_uuid: str,
     dry_run: bool,
 ) -> None:
-    """Payload как в eGames create_host()."""
     hosts = list_hosts(client)
     for h in hosts:
-        if h.get("remark") == remark or h.get("configProfileInboundUuid") == inbound_uuid:
-            # nested form in some versions
-            inn = h.get("inbound") or {}
-            if inn.get("configProfileInboundUuid") == inbound_uuid or h.get("remark") == remark:
-                LOG.info("Host exists remark=%s — skip", remark)
-                return
+        inn = h.get("inbound") or {}
+        if (
+            h.get("remark") == remark
+            or h.get("configProfileInboundUuid") == inbound_uuid
+            or inn.get("configProfileInboundUuid") == inbound_uuid
+        ):
+            LOG.info("Host exists remark=%s — skip", remark)
+            return
 
     body = {
         "inbound": {
@@ -456,21 +468,12 @@ def ensure_host(
     client.post("/hosts", body)
 
 
-def list_nodes(client: RemnawaveClient) -> List[Dict]:
-    return unwrap_list(client.get("/nodes"), "nodes", "items")
-
-
-def list_squads(client: RemnawaveClient) -> List[Dict]:
-    return unwrap_list(client.get("/internal-squads"), "internalSquads", "items")
-
-
 def update_squad_inbounds(
     client: RemnawaveClient,
     squad_uuid: str,
     inbound_uuids: List[str],
     dry_run: bool,
 ) -> None:
-    """PATCH /api/internal-squads  { uuid, inbounds: [...] }  как eGames."""
     squads = list_squads(client)
     squad = next((s for s in squads if s.get("uuid") == squad_uuid), None)
     if not squad:
@@ -492,7 +495,6 @@ def activate_node_inbounds(
     inbound_uuids: List[str],
     dry_run: bool,
 ) -> None:
-    """Назначить профиль и activeInbounds на ноду (формат eGames create_node)."""
     body = {
         "configProfile": {
             "activeConfigProfileUuid": profile_uuid,
@@ -504,24 +506,24 @@ def activate_node_inbounds(
         return
     try:
         client.patch(f"/nodes/{node_uuid}", body)
-    except RuntimeError:
-        # некоторые версии принимают полный объект
-        try:
-            client.put(f"/nodes/{node_uuid}", body)
-        except Exception as e:
-            LOG.warning("Node attach failed: %s", e)
+    except RuntimeError as e:
+        LOG.warning("Node attach failed: %s", e)
 
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
 
 def run(cfg: Dict[str, Any]) -> int:
     dry_run = bool(cfg.get("dry_run"))
     token = (cfg.get("panel_api_token") or "").strip()
-    if not token or token.startswith("rwa_REPLACE"):
+    if not token or "REPLACE" in token or "ВАШ" in token:
         LOG.error("Заполните panel_api_token в config.yaml")
         return 1
 
     host_address = (cfg.get("host_address") or "").strip()
     if not host_address or host_address == "node.example.com":
-        LOG.error("Заполните host_address в config.yaml (домен/IP ноды)")
+        LOG.error("Заполните host_address в config.yaml")
         return 1
 
     client = RemnawaveClient(
@@ -540,7 +542,6 @@ def run(cfg: Dict[str, Any]) -> int:
     reality_sni = (cfg.get("reality_server_name") or host_address).strip()
     reality_dest = (cfg.get("reality_dest") or "/dev/shm/nginx.sock").strip()
 
-    # Один набор Reality-ключей на профиль (как eGames) — только для НОВЫХ inbounds
     priv, _pub = client.generate_x25519()
     short_id = secrets.token_hex(8)
     LOG.info("Reality shortId prepared")
@@ -574,7 +575,6 @@ def run(cfg: Dict[str, Any]) -> int:
         client, uuid=profile_uuid, name=profile_name, config=new_config, dry_run=dry_run
     )
 
-    # Перечитываем inbounds с UUID от панели
     tag_to_uuid: Dict[str, str] = {}
     port_by_tag: Dict[str, int] = {s["tag"]: int(s.get("port") or 443) for s in specs}
     if not dry_run:
@@ -587,7 +587,6 @@ def run(cfg: Dict[str, Any]) -> int:
         for s in specs:
             tag_to_uuid[s["tag"]] = "dry-run"
 
-    # Node
     LOG.info("=== Node ===")
     nodes = list_nodes(client)
     node_uuid = (cfg.get("node_uuid") or "").strip()
@@ -606,7 +605,6 @@ def run(cfg: Dict[str, Any]) -> int:
     else:
         LOG.warning("Нет ноды — пропускаем привязку activeInbounds")
 
-    # Hosts
     LOG.info("=== Hosts ===")
     prefix = (cfg.get("host_remark_prefix") or "").strip()
     for spec in specs:
@@ -626,7 +624,6 @@ def run(cfg: Dict[str, Any]) -> int:
             dry_run=dry_run,
         )
 
-    # Squad
     LOG.info("=== Internal Squad ===")
     squad_name = cfg.get("internal_squad_name") or "Default-Squad"
     squads = list_squads(client)
@@ -639,7 +636,6 @@ def run(cfg: Dict[str, Any]) -> int:
     else:
         LOG.warning("No internal squad found")
 
-    # Verify
     LOG.info("=== Verify ===")
     if not dry_run:
         full = get_profile(client, profile_uuid)
@@ -648,24 +644,23 @@ def run(cfg: Dict[str, Any]) -> int:
         missing = [s["tag"] for s in specs if s["tag"] not in tags]
         if missing:
             LOG.warning("Missing after update: %s", missing)
-            return 2
         hosts = list_hosts(client)
         LOG.info("Hosts count: %d", len(hosts))
-        LOG.info("OK — inbounds и hosts созданы")
+        LOG.info("OK — inbounds и hosts обработаны")
     else:
         LOG.info("[DRY-RUN] done")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Remnawave eGames Injector (non-interactive)")
+    parser = argparse.ArgumentParser(description="Remnawave eGames Injector")
     parser.add_argument("-c", "--config", default="config.yaml")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     path = Path(args.config)
     if not path.is_file():
-        print(f"Нет файла {path}. Скопируйте: cp config.example.yaml config.yaml", file=sys.stderr)
+        print(f"Нет файла {path}. cp config.example.yaml config.yaml", file=sys.stderr)
         return 1
 
     with path.open(encoding="utf-8") as f:
@@ -675,7 +670,6 @@ def main() -> int:
     if args.dry_run:
         cfg["dry_run"] = True
 
-    # Env overrides (секреты)
     for env_key, cfg_key in (
         ("PANEL_API_TOKEN", "panel_api_token"),
         ("PANEL_API_URL", "panel_api_url"),
