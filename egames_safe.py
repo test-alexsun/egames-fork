@@ -426,6 +426,60 @@ def host_body(spec, profile_uuid, inbound_uuid, domain, node_uuid):
             "nodes": [node_uuid], "tags": [OWNER]}
 
 
+def reviewed_plugin(client, node, rt):
+    """Preserve native eGames filters; never execute hooks or edit plugin objects.
+
+    Reviewed against Node 3.4.3 plugin.service/generate-api-config and Panel
+    3.4.7. These filters are applied by Node independently of the profile PATCH.
+    Shared lists and lifecycle hooks require a separate resolver/runtime adapter.
+    """
+    uuid = node.get("activePluginUuid")
+    if not uuid:
+        return None
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", uuid):
+        raise RuntimeError("Invalid active Node plugin identity")
+    plugin = client.get(f"/node-plugins/{uuid}?_={time.time_ns()}")
+    config = plugin.get("pluginConfig") if isinstance(plugin, dict) else None
+    if not isinstance(plugin, dict) or plugin.get("uuid") != uuid or not isinstance(config, dict):
+        raise RuntimeError("Cannot read the active Node plugin configuration")
+    allowed = {
+        "torrentBlocker": {"enabled", "blockDuration", "ignoreLists", "includeRuleTags", "rulePlacement", "webhookUrl"},
+        "ingressFilter": {"enabled", "blockedIps"},
+        "egressFilter": {"enabled", "blockedIps", "blockedPorts"},
+        "connectionDrop": {"enabled", "whitelistIps"},
+    }
+    if set(config) - set(allowed):
+        raise RuntimeError("Node plugin hooks/unknown sections need a dedicated adapter")
+    for name, section in config.items():
+        if not isinstance(section, dict) or set(section) - allowed[name] or type(section.get("enabled")) is not bool:
+            raise RuntimeError("Unsupported Node plugin section or fields")
+        if name == "connectionDrop" and section["enabled"]:
+            raise RuntimeError("Connection-drop plugin requires a dedicated runtime adapter")
+        for field in ("blockedIps", "whitelistIps"):
+            values = section.get(field, [])
+            if not isinstance(values, list):
+                raise RuntimeError("Unsupported Node plugin IP list")
+            try:
+                for value in values:
+                    ipaddress.ip_network(value, strict=False)
+            except (ValueError, TypeError):
+                raise RuntimeError("Shared/dynamic Node plugin IP lists require a resolver adapter") from None
+        ports = section.get("blockedPorts", [])
+        if not isinstance(ports, list) or any(type(port) is not int or not 1 <= port <= 65535 for port in ports):
+            raise RuntimeError("Unsupported Node plugin port list")
+    caps = {cap.removeprefix("CAP_") for cap in rt.node.get("HostConfig", {}).get("CapAdd", []) or []}
+    if any(section["enabled"] for section in config.values()) and "NET_ADMIN" not in caps:
+        raise RuntimeError("Native Node filters require NET_ADMIN capability")
+    return {"uuid": uuid, "pluginConfig": copy.deepcopy(config)}
+
+
+def verify_plugin(client, rt, p):
+    nodes = unwrap_list(client.get("/nodes"), "nodes")
+    node = select_one(nodes, "plugin-bound Node", p["node"]["uuid"])
+    if reviewed_plugin(client, node, rt) != p.get("plugin"):
+        raise RuntimeError("Node plugin binding/configuration changed during installation")
+
+
 def plan(client, rt, cfg, state, occupied):
     meta = client.get("/system/metadata")
     version = meta.get("version", "").lstrip("v")
@@ -454,8 +508,7 @@ def plan(client, rt, cfg, state, occupied):
         raise RuntimeError("Cannot resolve selected Node management address") from None
     if not addresses.intersection(local):
         raise RuntimeError("Selected Panel node does not refer to this VPS")
-    if node.get("activePluginUuid"):
-        raise RuntimeError("Node plugins need a dedicated validation adapter")
+    plugin = reviewed_plugin(client, node, rt)
     pid = node["configProfile"]["activeConfigProfileUuid"]
     if any(n["uuid"] != node["uuid"] and n.get("configProfile", {}).get("activeConfigProfileUuid") == pid for n in nodes):
         raise RuntimeError("Active profile is shared by other nodes; refusing global changes")
@@ -566,7 +619,7 @@ def plan(client, rt, cfg, state, occupied):
         raise RuntimeError("Original 443 listener was modified")
     return {"profile": profile, "node": node, "squads": target_squads, "hosts": hosts,
             "config": desired, "specs": specs, "nginx": nginx, "domain": domain,
-            "diagnostics": diagnostics, "panel_version": version}
+            "diagnostics": diagnostics, "panel_version": version, "plugin": plugin}
 
 
 def project(value, shape):
@@ -799,6 +852,7 @@ def verify(client, rt, p):
     command(["docker", "exec", rt.nginx["Id"], "nginx", "-t"])
     if ("tcp", 443) not in occupied:
         raise RuntimeError("Original TCP 443 listener disappeared")
+    verify_plugin(client, rt, p)
     return node
 
 
@@ -809,12 +863,14 @@ def apply(client, rt, p, directory, state):
     latest = client.get(f"/config-profiles/{p['profile']['uuid']}")
     if latest["config"] != p["profile"]["config"] or rt.nginx_path.read_text(encoding="utf-8") != rt.nginx_text:
         raise RuntimeError("Configuration changed since planning")
+    verify_plugin(client, rt, p)
     check_ports(p["profile"]["config"], p["config"], occupied_ports())
     tx = Transaction(client, rt, directory, state)
     tx.save()
     backup_path = Path(directory) / "backups" / f"{time.time_ns()}.json"
     private_json(backup_path, {"owner": OWNER, "profile": p["profile"], "node": p["node"],
-                              "hosts": p["hosts"], "squads": p["squads"], "nginx": rt.nginx_text})
+                              "hosts": p["hosts"], "squads": p["squads"], "nginx": rt.nginx_text,
+                              "plugin": p.get("plugin")})
     try:
         tx.api("profile", "/config-profiles", profile_patch(p["profile"], p["profile"]["config"]),
                profile_patch(p["profile"], p["config"]))
@@ -900,7 +956,8 @@ def run(cfg):
         with lock(directory):
             path = directory / "backups" / f"manual-{time.time_ns()}.json"
             private_json(path, {"owner": OWNER, "profile": p["profile"], "hosts": p["hosts"],
-                               "node": p["node"], "squads": p["squads"], "nginx": rt.nginx_text})
+                               "node": p["node"], "squads": p["squads"], "nginx": rt.nginx_text,
+                               "plugin": p.get("plugin")})
             print(f"Private backup: {path}")
         return 0
     with lock(directory):

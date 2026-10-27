@@ -21,8 +21,11 @@ class API:
         self.version = "3.4.7"
         self.fail = None
         self.lose_reply = False
+        self.plugins = {}
 
     def get(self, path):
+        if path.startswith("/node-plugins/"):
+            return copy.deepcopy(self.plugins.get(path.split("/")[-1].split("?")[0], {}))
         if path == "/system/metadata":
             return {"version": self.version}
         if path == "/nodes":
@@ -125,6 +128,71 @@ class SafeTests(unittest.TestCase):
         self.plan()
         self.assertEqual(self.api.__dict__, original)
         self.assertEqual(sorted(Path(self.tmp.name).rglob("*")), before)
+
+    def native_plugin(self):
+        uuid = "11111111-1111-4111-8111-111111111111"
+        self.api.nodes[0]["activePluginUuid"] = uuid
+        self.rt.node["HostConfig"] = {"CapAdd": ["NET_ADMIN"]}
+        self.api.plugins[uuid] = {"uuid": uuid, "pluginConfig": {
+            "torrentBlocker": {"enabled": True, "blockDuration": 3600, "ignoreLists": {"ip": []}},
+            "ingressFilter": {"enabled": True, "blockedIps": ["192.0.2.0/24"]}}}
+        return uuid
+
+    def test_native_plugin_is_preserved_without_plugin_writes(self):
+        uuid = self.native_plugin()
+        original = copy.deepcopy(self.api.plugins)
+        p = self.plan()
+        self.apply(p)
+        self.assertEqual(self.api.plugins, original)
+        self.assertEqual(self.api.nodes[0]["activePluginUuid"], uuid)
+        self.assertFalse(any("node-plugins" in path for _, path, _ in self.api.writes))
+
+    def test_plugin_hooks_and_shared_lists_are_rejected(self):
+        uuid = self.native_plugin()
+        self.api.plugins[uuid]["pluginConfig"]["preStart"] = {"enabled": True, "script": "unsafe"}
+        with self.assertRaisesRegex(RuntimeError, "hooks/unknown"):
+            self.plan()
+        del self.api.plugins[uuid]["pluginConfig"]["preStart"]
+        self.api.plugins[uuid]["pluginConfig"]["ingressFilter"]["blockedIps"] = ["@dynamic-list"]
+        with self.assertRaisesRegex(RuntimeError, "resolver adapter"):
+            self.plan()
+        self.assertEqual(self.api.writes, [])
+
+    def test_plugin_drift_fails_before_profile_write(self):
+        uuid = self.native_plugin()
+        p = self.plan()
+        self.api.plugins[uuid]["pluginConfig"]["torrentBlocker"]["enabled"] = False
+        with self.assertRaisesRegex(RuntimeError, "changed during"):
+            s.apply(self.api, self.rt, p, self.tmp.name, self.state)
+        self.assertEqual(self.api.writes, [])
+
+    def test_plugin_added_after_planning_fails_before_profile_write(self):
+        p = self.plan()
+        self.native_plugin()
+        with self.assertRaisesRegex(RuntimeError, "changed during"):
+            s.apply(self.api, self.rt, p, self.tmp.name, self.state)
+        self.assertEqual(self.api.writes, [])
+
+    def test_plugin_binding_removed_and_non_object_response_fail_closed(self):
+        uuid = self.native_plugin()
+        p = self.plan()
+        self.api.nodes[0]["activePluginUuid"] = None
+        with self.assertRaisesRegex(RuntimeError, "changed during"):
+            s.verify_plugin(self.api, self.rt, p)
+        self.api.nodes[0]["activePluginUuid"] = uuid
+        self.api.plugins[uuid] = None
+        with self.assertRaisesRegex(RuntimeError, "Cannot read"):
+            self.plan()
+
+    def test_missing_plugin_or_net_admin_fails_closed(self):
+        uuid = self.native_plugin()
+        self.rt.node["HostConfig"]["CapAdd"] = []
+        with self.assertRaisesRegex(RuntimeError, "NET_ADMIN"):
+            self.plan()
+        self.rt.node["HostConfig"]["CapAdd"] = ["NET_ADMIN"]
+        del self.api.plugins[uuid]
+        with self.assertRaisesRegex(RuntimeError, "Cannot read"):
+            self.plan()
 
     def test_preserves_all_original_sections_and_443(self):
         p = self.plan()
