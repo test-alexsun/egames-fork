@@ -486,6 +486,34 @@ class SafeTests(unittest.TestCase):
         self.assertEqual(s.active_ids(self.api.nodes[0]), s.active_ids(original["nodes"][0]))
         self.assertEqual(self.rt.nginx_path.read_text(), (FIXTURES / "nginx.conf").read_text())
 
+    def test_rollback_preserves_later_subscription_and_acme_configuration(self):
+        original = copy.deepcopy(self.api.profile)
+        self.apply(self.plan())
+        added = '\nserver { listen 80; server_name new-acme.example.com; location / { return 404; } }\n'
+        self.rt.nginx_path.write_text(self.rt.nginx_path.read_text() + added)
+        s.recover(self.api, self.rt, self.tmp.name)
+        self.assertEqual(self.api.profile, original)
+        restored = self.rt.nginx_path.read_text()
+        self.assertTrue(restored.endswith(added))
+        self.assertNotIn(s.BEGIN, restored)
+        # A second recovery must preserve the later unowned vhost as well.
+        s.recover(self.api, self.rt, self.tmp.name)
+        self.assertEqual(self.rt.nginx_path.read_text(), restored)
+
+    def test_rollback_rejects_edits_inside_owned_nginx_routes(self):
+        self.apply(self.plan())
+        changed = self.rt.nginx_path.read_text().replace('proxy_pass http://127.0.0.1:', 'proxy_pass http://127.0.0.2:')
+        self.rt.nginx_path.write_text(changed)
+        with self.assertRaisesRegex(RuntimeError, 'INCOMPLETE'):
+            s.recover(self.api, self.rt, self.tmp.name)
+        self.assertEqual(self.rt.nginx_path.read_text(), changed)
+
+    def test_nginx_recovery_does_not_merge_unowned_whole_file_operations(self):
+        before = self.rt.nginx_text
+        after = self.plan()['nginx'] + '\n# extra change in recorded operation\n'
+        with self.assertRaisesRegex(RuntimeError, 'not limited'):
+            s.rollback_nginx(after + '\n# later administrator change\n', before, after)
+
     def test_node_api_failure_rolls_back_and_raises(self):
         original = copy.deepcopy(self.api.profile)
         self.api.fail = "/nodes"

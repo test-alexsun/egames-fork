@@ -1,0 +1,12 @@
+# Install the original eGames Node + one Nginx first. No local Panel/database.
+# API credentials/cookie are discovered from one existing Subscription container.
+# Explicit overrides use private root-owned 0600 files. Never commit real secrets.
+node_uuid: "REPLACE_WITH_REMOTE_PANEL_NODE_UUID"
+host_address: "node.example.com"
+subscription_domain: "sub.example.com"
+# panel_api_url: "https://panel.example.com/api"
+# token_file: "/root/remote-panel.token"
+# cookie_file: "/root/remote-panel.cookie"
+# subscription_test_url_file: "/root/existing-test-subscription-json.url"
+# host_country_code: "DE"  # Set only after verifying the public IP's country.
+timeout: 30

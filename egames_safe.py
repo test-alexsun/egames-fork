@@ -89,7 +89,10 @@ def lookup_country_code(domain):
 def host_remark(tag, code):
     code = country_code(code)
     flag = "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code)
-    return f"{flag} | {HOST_LABELS[tag.upper()]}"
+    label = HOST_LABELS.get(tag.upper()) or HOST_LABELS.get("EGADDON-" + tag.upper().rsplit("-", 1)[-1])
+    if not label:
+        raise RuntimeError("Unknown managed Host protocol")
+    return f"{flag} | {label}"
 
 
 def command(args, data=None, check=True):
@@ -221,6 +224,11 @@ def node_server(text, domain):
     for block in nginx_blocks(text):
         names = re.search(r"\bserver_name\s+([^;]+);", block[2])
         if names and domain in names[1].split():
+            listeners = re.findall(r"\blisten\s+([^;]+);", block[2])
+            # A shared HTTP-01 vhost may name the Node domain as well.
+            # It is not a second candidate for the TLS SelfSteal server.
+            if listeners and all(re.search(r"(?:^|:)80(?:\s|$)", v) and "ssl" not in v.split() for v in listeners):
+                continue
             found.append(block)
     if len(found) != 1:
         raise RuntimeError("Cannot uniquely locate selfsteal server block")
@@ -236,6 +244,23 @@ def managed_nginx(text):
     if len(parts) > 1 or text.count(BEGIN) != text.count(END):
         raise RuntimeError("Ambiguous managed Nginx blocks")
     return parts[0] if parts else ""
+
+
+def rollback_nginx(actual, before, after):
+    """Restore our routes while retaining later unrelated vhost/ACME edits."""
+    if actual in (before, after):
+        return before
+    old, new, current = managed_nginx(before), managed_nginx(after), managed_nginx(actual)
+    if current == old and old != new:
+        return actual  # Our routes were already restored; preserve unrelated edits.
+    if not new or current != new:
+        raise RuntimeError("Managed Nginx route drift blocks automatic rollback")
+    # Only the add-on's known route delta may be merged. Never merge an
+    # arbitrary whole-file change recorded in a different kind of operation.
+    normalize = lambda value: "\n".join(line.rstrip() for line in value.splitlines() if line.strip())
+    if normalize(after.replace(new, old, 1)) != normalize(before):
+        raise RuntimeError("Recorded Nginx change is not limited to managed routes")
+    return actual.replace(new, old, 1)
 
 
 def add_routes(text, domain, routes):
@@ -349,7 +374,13 @@ class Runtime:
             return c.get("Config", {}).get("Image", "").lower()
         self.node = select_one([c for c in containers if "remnawave/node" in image(c)], "local Node", cfg.get("node_container", ""))
         self.nginx = select_one([c for c in containers if image(c).split(":")[0].endswith("nginx")], "Nginx", cfg.get("nginx_container", ""))
-        self.panel = select_one([c for c in containers if "remnawave/backend" in image(c)], "Panel")
+        remote = cfg.get("deployment") == "node-only"
+        if remote:
+            from egames_node import remote_settings
+            cfg = {**cfg, **remote_settings(containers, cfg)}
+            self.panel = None
+        else:
+            self.panel = select_one([c for c in containers if "remnawave/backend" in image(c)], "Panel")
         for c in (self.node, self.nginx):
             if c.get("HostConfig", {}).get("NetworkMode") != "host":
                 raise RuntimeError("Only local Node + Nginx with host networking is supported")
@@ -360,6 +391,7 @@ class Runtime:
             raise RuntimeError("Nginx source must be a mounted regular file")
         self.nginx_text = self.nginx_path.read_text(encoding="utf-8")
         self.api = cfg.get("panel_api_url")
+        self.cookie = cfg.get("panel_cookie", "")
         if not self.api:
             bindings = self.panel.get("NetworkSettings", {}).get("Ports", {}).get("3000/tcp") or []
             bindings = [b for b in bindings if b["HostIp"] in ("127.0.0.1", "0.0.0.0", "")]
@@ -570,6 +602,13 @@ def plan(client, rt, cfg, state, occupied):
         raise RuntimeError("Panel-reported core differs from the validated local Xray executable")
     if state.get("profile_uuid", node["configProfile"]["activeConfigProfileUuid"]) != node["configProfile"]["activeConfigProfileUuid"]:
         raise RuntimeError("Active profile changed since installation; refusing state migration")
+    if state.get("node_uuid", node["uuid"]) != node["uuid"]:
+        raise RuntimeError("Selected Node differs from installer state")
+    prefix = cfg.get("tag_prefix", "EGADDON")
+    if not re.fullmatch(r"EGADDON(?:-[A-Z0-9]{1,32})?", prefix):
+        raise RuntimeError("Invalid managed tag_prefix")
+    if state.get("tag_prefix", prefix) != prefix:
+        raise RuntimeError("Managed tag prefix changed; restore the original configuration")
     # Make sure the selected panel node actually points to this VPS.
     addr = node.get("address", "")
     local = {"127.0.0.1", "localhost", "::1"}
@@ -630,7 +669,7 @@ def plan(client, rt, cfg, state, occupied):
                    ("PQ", "vless", "raw", "reality", False), ("SS2022", "shadowsocks", "raw", "none", False),
                    ("HY2", "hysteria", "hysteria", "tls", False)]
     for label, proto, net, security, frontend in definitions:
-        tag = f"EGADDON-{label}"
+        tag = f"{prefix}-{label}"
         old = tags.get(tag)
         if tag in global_tags or (old and tag not in state.get("tags", [])):
             raise RuntimeError(f"Unowned inbound tag conflict: {tag}")
@@ -696,7 +735,7 @@ def plan(client, rt, cfg, state, occupied):
     return {"profile": profile, "node": node, "squads": target_squads, "hosts": hosts,
             "config": desired, "specs": specs, "nginx": nginx, "domain": domain,
             "diagnostics": diagnostics, "panel_version": version, "plugin": plugin,
-            "country_code": code, "base_hosts": base_hosts}
+            "country_code": code, "base_hosts": base_hosts, "tag_prefix": prefix}
 
 
 def project(value, shape):
@@ -840,12 +879,11 @@ class Transaction:
                         raise RuntimeError("UFW rollback not confirmed")
                 elif op["kind"] == "nginx":
                     actual = self.rt.nginx_path.read_text(encoding="utf-8")
-                    if actual == op["before"]:
+                    restored = rollback_nginx(actual, op["before"], op["after"])
+                    if actual == restored:
                         continue
-                    if actual != op["after"]:
-                        raise RuntimeError("Nginx drift blocks automatic rollback")
-                    self.rt.validate_nginx(op["before"])
-                    self.rt.write_nginx(op["before"])
+                    self.rt.validate_nginx(restored)
+                    self.rt.write_nginx(restored)
                     self.rt.reload()
                 else:
                     actual = current_object(self.client, op)
@@ -967,6 +1005,7 @@ def apply(client, rt, p, directory, state):
         history_path = Path(directory) / "transactions" / f"{time.time_ns()}.json"
         inbound_tags = {i["uuid"]: i["tag"] for i in client.get(f"/config-profiles/{p['profile']['uuid']}")["inbounds"]}
         new_state = {"owner": OWNER, "profile_uuid": p["profile"]["uuid"], "node_uuid": p["node"]["uuid"],
+            "tag_prefix": p["tag_prefix"],
             "history": state.get("history", []) + [str(history_path)],
             "nginx_managed": managed_nginx(p["nginx"]),
             "host_ids": {inbound_tags[h["inbound"]["configProfileInboundUuid"]]: h["uuid"] for h in hosts
@@ -1009,7 +1048,7 @@ def run(cfg):
         raise RuntimeError("Mutating modes require root")
     directory = Path(cfg.get("state_dir", "/var/lib/egames-injector"))
     rt = Runtime(cfg)
-    client = RemnawaveClient(rt.api, rt.token, timeout=int(cfg.get("timeout", 30)))
+    client = RemnawaveClient(rt.api, rt.token, cookie=getattr(rt, "cookie", ""), timeout=int(cfg.get("timeout", 30)))
     if mode in ("restore", "uninstall"):
         with lock(directory):
             if mode == "restore":
