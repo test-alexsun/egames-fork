@@ -9,6 +9,13 @@ outbounds, DNS, routing, policy, Hosts, сертификаты и защиту �
 [docs/LIVE_SW126.md](docs/LIVE_SW126.md). Результаты относятся к указанным версиям
 и одному VPS; синтаксическая проверка сама по себе не подтверждает клиентский трафик.
 
+## Node-only с удалённой панелью
+
+Для существующих eGames Node + Subscription + Nginx без локальной панели используйте
+`bash install-node.sh -c /root/node.yaml --dry-run`. Требуется явный `node_uuid`;
+подробнее: [docs/NODE_ONLY.md](docs/NODE_ONLY.md), пример: `config.node.example.yaml`.
+Исходный `install.sh` сохраняет сценарий Panel + Node.
+
 ## Требования и границы совместимости
 
 | Компонент | Условия |
