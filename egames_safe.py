@@ -224,6 +224,11 @@ def node_server(text, domain):
     for block in nginx_blocks(text):
         names = re.search(r"\bserver_name\s+([^;]+);", block[2])
         if names and domain in names[1].split():
+            listeners = re.findall(r"\blisten\s+([^;]+);", block[2])
+            # A shared HTTP-01 vhost may name the Node domain as well.
+            # It is not a second candidate for the TLS SelfSteal server.
+            if listeners and all(re.search(r"(?:^|:)80(?:\s|$)", v) and "ssl" not in v.split() for v in listeners):
+                continue
             found.append(block)
     if len(found) != 1:
         raise RuntimeError("Cannot uniquely locate selfsteal server block")
@@ -239,6 +244,23 @@ def managed_nginx(text):
     if len(parts) > 1 or text.count(BEGIN) != text.count(END):
         raise RuntimeError("Ambiguous managed Nginx blocks")
     return parts[0] if parts else ""
+
+
+def rollback_nginx(actual, before, after):
+    """Restore our routes while retaining later unrelated vhost/ACME edits."""
+    if actual in (before, after):
+        return before
+    old, new, current = managed_nginx(before), managed_nginx(after), managed_nginx(actual)
+    if current == old and old != new:
+        return actual  # Our routes were already restored; preserve unrelated edits.
+    if not new or current != new:
+        raise RuntimeError("Managed Nginx route drift blocks automatic rollback")
+    # Only the add-on's known route delta may be merged. Never merge an
+    # arbitrary whole-file change recorded in a different kind of operation.
+    normalize = lambda value: "\n".join(line.rstrip() for line in value.splitlines() if line.strip())
+    if normalize(after.replace(new, old, 1)) != normalize(before):
+        raise RuntimeError("Recorded Nginx change is not limited to managed routes")
+    return actual.replace(new, old, 1)
 
 
 def add_routes(text, domain, routes):
@@ -857,12 +879,11 @@ class Transaction:
                         raise RuntimeError("UFW rollback not confirmed")
                 elif op["kind"] == "nginx":
                     actual = self.rt.nginx_path.read_text(encoding="utf-8")
-                    if actual == op["before"]:
+                    restored = rollback_nginx(actual, op["before"], op["after"])
+                    if actual == restored:
                         continue
-                    if actual != op["after"]:
-                        raise RuntimeError("Nginx drift blocks automatic rollback")
-                    self.rt.validate_nginx(op["before"])
-                    self.rt.write_nginx(op["before"])
+                    self.rt.validate_nginx(restored)
+                    self.rt.write_nginx(restored)
                     self.rt.reload()
                 else:
                     actual = current_object(self.client, op)

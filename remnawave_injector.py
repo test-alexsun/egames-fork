@@ -14,6 +14,7 @@ import logging
 import os
 import secrets
 import sys
+import time
 from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -80,10 +81,19 @@ class RemnawaveClient:
     ) -> Any:
         url = self._url(path)
         LOG.debug("%s %s", method, url)
-        try:
-            resp = self.session.request(method, url, json=body, timeout=self.timeout, allow_redirects=False)
-        except requests.RequestException:
-            raise RuntimeError(f"API transport failure: {method} {path}") from None
+        attempts = 3 if method.upper() == "GET" else 1
+        for attempt in range(attempts):
+            try:
+                resp = self.session.request(method, url, json=body, timeout=self.timeout, allow_redirects=False)
+            except requests.RequestException:
+                if attempt + 1 < attempts:
+                    time.sleep(0.5 * 2**attempt)
+                    continue
+                raise RuntimeError(f"API transport failure: {method} {path}") from None
+            if resp.status_code in (502, 503, 504) and attempt + 1 < attempts:
+                time.sleep(0.5 * 2**attempt)
+                continue
+            break
         if resp.status_code not in expected:
             raise RuntimeError(f"API HTTP {resp.status_code}: {method} {path}")
         if resp.status_code == 204 or not resp.content:

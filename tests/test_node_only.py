@@ -26,6 +26,20 @@ class RemoteSettingsTests(unittest.TestCase):
         self.assertEqual(result["panel_api_token"], "test-secret")
         self.assertEqual(result["panel_cookie"], "gate=testvalue")
 
+    def test_transient_get_retries_but_mutations_are_never_replayed(self):
+        client = s.RemnawaveClient("https://panel.example.com/api", "synthetic-token")
+        success = Mock(status_code=200, content=b"{}")
+        success.json.return_value = {"response": {"nodes": []}}
+        client.session.request = Mock(side_effect=[n.requests.Timeout(), Mock(status_code=503), success])
+        with patch("remnawave_injector.time.sleep"):
+            self.assertEqual(client.get("/nodes"), {"nodes": []})
+        self.assertEqual(client.session.request.call_count, 3)
+        for method in ("POST", "PATCH", "DELETE"):
+            client.session.request = Mock(side_effect=n.requests.Timeout())
+            with self.assertRaisesRegex(RuntimeError, "transport failure"):
+                client.request(method, "/hosts", {})
+            self.assertEqual(client.session.request.call_count, 1)
+
     def test_rejects_local_panel_and_ambiguous_subscriptions(self):
         with self.assertRaisesRegex(RuntimeError, "without a local Panel"):
             n.remote_settings([self.sub, {"Config": {"Image": "remnawave/backend:3"}}], self.cfg)
@@ -104,6 +118,16 @@ class RemoteSettingsTests(unittest.TestCase):
 
 
 class RemotePlanTests(unittest.TestCase):
+    def test_http_acme_vhost_is_preserved_and_not_selected_as_selfsteal(self):
+        source = (Path(__file__).parent / "fixtures/nginx.conf").read_text()
+        acme = '\nserver { listen 80; server_name node.example.com sub.example.com; location / { return 404; } }\n'
+        candidate = s.add_routes(source + acme, "node.example.com", [
+            {"path": "/egadd/" + "a" * 24 + "/", "port": 25000, "network": "ws"}])
+        self.assertTrue(candidate.endswith(acme))
+        self.assertEqual(len(s.nginx_blocks(candidate)), len(s.nginx_blocks(source)) + 1)
+        with self.assertRaises(RuntimeError):
+            s.node_server(acme, "node.example.com")
+
     def test_remote_profile_tags_do_not_conflict_with_existing_other_node(self):
         with tempfile.TemporaryDirectory() as temp:
             api, rt = API(), Runtime(temp)

@@ -15,6 +15,8 @@ outbounds, DNS, routing, policy, Hosts, сертификаты и защиту �
 `bash install-node.sh -c /root/node.yaml --dry-run`. Требуется явный `node_uuid`;
 подробнее: [docs/NODE_ONLY.md](docs/NODE_ONLY.md), пример: `config.node.example.yaml`.
 Исходный `install.sh` сохраняет сценарий Panel + Node.
+Развёртывание с удалённой панелью, восемь реальных клиентов и контрольный рестарт:
+[docs/LIVE_DE126.md](docs/LIVE_DE126.md).
 
 ## Требования и границы совместимости
 
