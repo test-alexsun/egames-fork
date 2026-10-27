@@ -23,6 +23,8 @@ import platform
 from contextlib import contextmanager
 from pathlib import Path
 
+import requests
+
 from remnawave_injector import RemnawaveClient, build_inbound, unwrap_list
 
 OWNER = "EGAMES_ADDON"
@@ -30,6 +32,64 @@ BEGIN = "# BEGIN EGAMES_ADDON"
 END = "# END EGAMES_ADDON"
 REVIEWED_PANEL = {"3.4.7"}
 REVIEWED_NODE = {"3.4.3"}
+COUNTRY_CODES = frozenset("""
+AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
+CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR
+GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP
+KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ
+NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW
+SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ
+UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW
+""".split())
+HOST_LABELS = {
+    "STEAL": "VLESS | TCP REALITY Vision",
+    "EGADDON-WS": "VLESS | WS TLS",
+    "EGADDON-XHTTP": "VLESS | XHTTP TLS",
+    "EGADDON-GRPC": "Trojan | gRPC TLS",
+    "EGADDON-XREALITY": "VLESS | XHTTP REALITY",
+    "EGADDON-PQ": "VLESS | TCP REALITY ML-KEM768",
+    "EGADDON-SS2022": "Shadowsocks | 2022 AES-256-GCM",
+    "EGADDON-HY2": "Hysteria2 | QUIC TLS",
+}
+
+
+def country_code(value):
+    code = value.strip().upper() if isinstance(value, str) else ""
+    if code not in COUNTRY_CODES:
+        raise RuntimeError("host_country_code must be an ISO 3166-1 alpha-2 country code")
+    return code
+
+
+def lookup_country_code(domain):
+    """Query the endpoint's public IPv4, with a separate unauthenticated HTTPS session."""
+    try:
+        addresses = {a[4][0] for a in socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)}
+    except OSError:
+        addresses = set()
+    if len(addresses) != 1 or not ipaddress.ip_address(next(iter(addresses))).is_global:
+        raise RuntimeError("Cannot identify one public VPS IPv4; set host_country_code explicitly")
+    address = next(iter(addresses))
+    with requests.Session() as session:
+        session.trust_env = False
+        for base, field in (("https://ipwho.is/", "country_code"), ("https://ipinfo.io/", "country")):
+            url = base + address + ("/json" if field == "country" else "")
+            try:
+                response = session.get(url, timeout=(3, 5), allow_redirects=False)
+                if response.status_code != 200:
+                    continue
+                data = response.json()
+                if data.get("ip") != address or data.get("success") is False:
+                    continue
+                return country_code(data.get(field))
+            except (requests.RequestException, ValueError, AttributeError, RuntimeError):
+                continue
+    raise RuntimeError("GeoIP unavailable; set host_country_code to the verified VPS country")
+
+
+def host_remark(tag, code):
+    code = country_code(code)
+    flag = "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code)
+    return f"{flag} | {HOST_LABELS[tag.upper()]}"
 
 
 def command(args, data=None, check=True):
@@ -428,10 +488,10 @@ def profile_patch(profile, config):
     return {"uuid": profile["uuid"], "name": profile["name"], "config": config}
 
 
-def host_body(spec, profile_uuid, inbound_uuid, domain, node_uuid):
+def host_body(spec, profile_uuid, inbound_uuid, domain, node_uuid, code):
     frontend = spec.get("frontend", False)
     return {"inbound": {"configProfileUuid": profile_uuid, "configProfileInboundUuid": inbound_uuid},
-            "remark": f"eGames | {spec['tag']}", "address": domain,
+            "remark": host_remark(spec["tag"], code), "address": domain,
             "port": 443 if frontend else spec["port"], "sni": domain, "host": domain if frontend else "",
             "path": spec.get("service_name", "") if spec["network"] == "grpc" else spec.get("path", "") if spec["network"] in ("ws", "xhttp") else "",
             "fingerprint": "chrome", "alpn": "h2" if spec["network"] == "grpc" else None,
@@ -551,6 +611,9 @@ def plan(client, rt, cfg, state, occupied):
     old443id = next((i["uuid"] for i in profile["inbounds"] if i["tag"] == old443[0]["tag"]), None)
     if not old443id or old443id not in active_ids(node):
         raise RuntimeError("Existing 443 inbound is not active on the selected node")
+    code = country_code(cfg["host_country_code"]) if cfg.get("host_country_code") else lookup_country_code(domain)
+    base_hosts = [h for h in hosts if h.get("address") == domain and h.get("inbound") == {
+        "configProfileUuid": pid, "configProfileInboundUuid": old443id}]
     target_squads = [s for s in squads if old443id in [i["uuid"] for i in s.get("inbounds", [])]]
     if not target_squads:
         raise RuntimeError("No Internal Squad authorizes the existing 443 inbound")
@@ -632,7 +695,8 @@ def plan(client, rt, cfg, state, occupied):
         raise RuntimeError("Original 443 listener was modified")
     return {"profile": profile, "node": node, "squads": target_squads, "hosts": hosts,
             "config": desired, "specs": specs, "nginx": nginx, "domain": domain,
-            "diagnostics": diagnostics, "panel_version": version, "plugin": plugin}
+            "diagnostics": diagnostics, "panel_version": version, "plugin": plugin,
+            "country_code": code, "base_hosts": base_hosts}
 
 
 def project(value, shape):
@@ -816,6 +880,13 @@ class Transaction:
 
 def bind_hosts_and_node(tx, p, state):
     client = tx.client
+    # The original eGames Host gets only a display-name PATCH, never add-on ownership.
+    current_hosts = {h["uuid"]: h for h in unwrap_list(client.get("/hosts"), "hosts")}
+    for host in p["base_hosts"]:
+        if current_hosts.get(host["uuid"]) != host:
+            raise RuntimeError("Original Host changed since planning")
+        before = {"uuid": host["uuid"], "remark": host["remark"]}
+        tx.api("host", "/hosts", before, {**before, "remark": host_remark("STEAL", p["country_code"])})
     full = client.get(f"/config-profiles/{p['profile']['uuid']}")
     tag_ids = {i["tag"]: i["uuid"] for i in full["inbounds"]}
     managed_ids = []
@@ -824,7 +895,7 @@ def bind_hosts_and_node(tx, p, state):
             raise RuntimeError("Missing managed inbound UUID after profile update")
         iid = tag_ids[spec["tag"]]
         managed_ids.append(iid)
-        body = host_body(spec, full["uuid"], iid, p["domain"], p["node"]["uuid"])
+        body = host_body(spec, full["uuid"], iid, p["domain"], p["node"]["uuid"], p["country_code"])
         saved_id = state.get("host_ids", {}).get(spec["tag"])
         matches = [h for h in p["hosts"] if h.get("uuid") == saved_id] if saved_id else [
             h for h in p["hosts"] if h.get("inbound") == body["inbound"]]
@@ -957,11 +1028,13 @@ def run(cfg):
     p = plan(client, rt, cfg, state, occupied_ports())
     print(f"Panel {p['panel_version']}; Node {p['node']['versions']['node']}; {rt.version}")
     print(f"Active profile: {p['profile']['name']}; public endpoint: {p['domain']}:443")
+    if p["base_hosts"]:
+        print(f"Original REALITY Host name: {host_remark('STEAL', p['country_code'])}")
     for d in p["diagnostics"]:
         print(d)
-    print("TAG | public port | local port | transport")
+    print("TAG | public port | local port | transport | Host name")
     for s in p["specs"]:
-        print(f"{s['tag']} | {443 if s['frontend'] else s['port']} | {s['port']} | {s['network']}")
+        print(f"{s['tag']} | {443 if s['frontend'] else s['port']} | {s['port']} | {s['network']} | {host_remark(s['tag'], p['country_code'])}")
     if mode in ("dry-run", "check", "status"):
         print("Read-only plan complete. Xray and Nginx validators passed; no client connection tested.")
         return 0

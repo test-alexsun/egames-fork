@@ -6,5 +6,6 @@
 # node_container: ""
 # nginx_container: ""
 # host_address: "node.example.com"  # defaults to existing REALITY serverNames[0]
+# host_country_code: "FI"  # optional verified ISO country; default: HTTPS GeoIP of host_address IPv4
 timeout: 30
 log_level: "INFO"

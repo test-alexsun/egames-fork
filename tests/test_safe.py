@@ -113,6 +113,9 @@ class SafeTests(unittest.TestCase):
         self.cmd = patch.object(s, "command", return_value=types.SimpleNamespace(stdout="[]", returncode=0))
         self.cmd.start()
         self.addCleanup(self.cmd.stop)
+        self.geo = patch.object(s, "lookup_country_code", return_value="FI")
+        self.lookup_country = self.geo.start()
+        self.addCleanup(self.geo.stop)
 
     def plan(self, occupied=None):
         return s.plan(self.api, self.rt, {}, self.state, occupied or {("tcp", 443)})
@@ -128,6 +131,59 @@ class SafeTests(unittest.TestCase):
         self.plan()
         self.assertEqual(self.api.__dict__, original)
         self.assertEqual(sorted(Path(self.tmp.name).rglob("*")), before)
+
+    def test_country_host_names_cover_all_eight_protocols(self):
+        expected = {
+            "Steal": "VLESS | TCP REALITY Vision",
+            "EGADDON-WS": "VLESS | WS TLS",
+            "EGADDON-XHTTP": "VLESS | XHTTP TLS",
+            "EGADDON-GRPC": "Trojan | gRPC TLS",
+            "EGADDON-XREALITY": "VLESS | XHTTP REALITY",
+            "EGADDON-PQ": "VLESS | TCP REALITY ML-KEM768",
+            "EGADDON-SS2022": "Shadowsocks | 2022 AES-256-GCM",
+            "EGADDON-HY2": "Hysteria2 | QUIC TLS",
+        }
+        for tag, label in expected.items():
+            self.assertEqual(s.host_remark(tag, "fi"), "\U0001f1eb\U0001f1ee | " + label)
+        self.assertEqual(s.host_remark("Steal", "DE"), "\U0001f1e9\U0001f1ea | VLESS | TCP REALITY Vision")
+        for code in ("XX", "ZZ", "Finland", "", None, 12):
+            with self.subTest(code=code), self.assertRaisesRegex(RuntimeError, "ISO 3166"):
+                s.country_code(code)
+
+    def test_explicit_country_avoids_geoip_and_invalid_country_has_no_writes(self):
+        p = s.plan(self.api, self.rt, {"host_country_code": " de "}, self.state, {("tcp", 443)})
+        self.assertEqual(p["country_code"], "DE")
+        self.lookup_country.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "ISO 3166"):
+            s.plan(self.api, self.rt, {"host_country_code": "ZZ"}, self.state, {("tcp", 443)})
+        self.assertEqual(self.api.writes, [])
+
+    def test_country_rename_preserves_original_host_fields_and_repeats_without_writes(self):
+        old = copy.deepcopy(self.api.hosts[0])
+        self.apply(self.plan())
+        current = self.api.hosts[0]
+        self.assertEqual(current, {**old, "remark": s.host_remark("STEAL", "FI")})
+        self.assertTrue(all(h["remark"].startswith("\U0001f1eb\U0001f1ee | ") for h in self.api.hosts))
+        self.state = s.read_state(self.tmp.name)
+        self.rt.nginx_text = self.rt.nginx_path.read_text()
+        names = {h["uuid"]: h["remark"] for h in self.api.hosts}
+        self.api.writes.clear()
+        self.apply(self.plan())
+        self.assertEqual({h["uuid"]: h["remark"] for h in self.api.hosts}, names)
+        self.assertEqual(self.api.writes, [])
+
+    def test_country_rename_does_not_touch_original_host_on_other_address(self):
+        self.api.hosts[0]["address"] = "other.example.com"
+        old = copy.deepcopy(self.api.hosts[0])
+        self.apply(self.plan())
+        self.assertEqual(self.api.hosts[0], old)
+
+    def test_country_rename_detects_concurrent_original_host_edit(self):
+        p = self.plan()
+        self.api.hosts[0]["remark"] = "Changed in Panel"
+        with self.assertRaisesRegex(RuntimeError, "Original Host changed"):
+            self.apply(p)
+        self.assertEqual(self.api.hosts[0]["remark"], "Changed in Panel")
 
     def native_plugin(self):
         uuid = "11111111-1111-4111-8111-111111111111"
@@ -207,7 +263,7 @@ class SafeTests(unittest.TestCase):
                 ib = next(i for i in p["config"]["inbounds"] if i["tag"] == spec["tag"])
                 self.assertEqual(ib["listen"], "127.0.0.1")
                 self.assertNotEqual(ib["streamSettings"].get("security"), "tls")
-                host = s.host_body(spec, "pid", "iid", p["domain"], "nid")
+                host = s.host_body(spec, "pid", "iid", p["domain"], "nid", p["country_code"])
                 self.assertEqual((host["port"], host["securityLayer"]), (443, "TLS"))
                 self.assertEqual(host["path"], spec["service_name"] if spec["network"] == "grpc" else spec["path"])
 
@@ -495,6 +551,46 @@ class SafeTests(unittest.TestCase):
         path = Path(self.tmp.name) / "private.json"
         s.private_json(path, {"key": "secret"})
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+
+class GeoIPTests(unittest.TestCase):
+    def setUp(self):
+        self.dns = patch.object(s.socket, "getaddrinfo", return_value=[
+            (s.socket.AF_INET, s.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))])
+        self.dns.start()
+        self.addCleanup(self.dns.stop)
+        self.factory = patch.object(s.requests, "Session")
+        self.session = self.factory.start().return_value.__enter__.return_value
+        self.addCleanup(self.factory.stop)
+
+    def test_geoip_uses_endpoint_ip_and_separate_https_session_with_fallback(self):
+        self.session.get.side_effect = [Mock(status_code=503), Mock(
+            status_code=200, json=Mock(return_value={"ip": "8.8.8.8", "country": "FI"}))]
+        self.assertEqual(s.lookup_country_code("node.example.com"), "FI")
+        self.assertFalse(self.session.trust_env)
+        self.assertEqual(self.session.get.call_args_list[0].args, ("https://ipwho.is/8.8.8.8",))
+        self.assertEqual(self.session.get.call_args_list[1].args, ("https://ipinfo.io/8.8.8.8/json",))
+        for call in self.session.get.call_args_list:
+            self.assertEqual(call.kwargs, {"timeout": (3, 5), "allow_redirects": False})
+
+    def test_geoip_rejects_wrong_ip_unassigned_country_and_redirect(self):
+        invalid = [Mock(status_code=200, json=Mock(return_value={"ip": "1.1.1.1", "country_code": "FI"})),
+                   Mock(status_code=200, json=Mock(return_value={"ip": "8.8.8.8", "country_code": "ZZ"})),
+                   Mock(status_code=302)]
+        for response in invalid:
+            with self.subTest(response=response):
+                self.session.get.side_effect = [response, s.requests.Timeout("private diagnostic")]
+                with self.assertRaisesRegex(RuntimeError, "GeoIP unavailable") as error:
+                    s.lookup_country_code("node.example.com")
+                self.assertNotIn("private diagnostic", str(error.exception))
+
+    def test_geoip_refuses_private_or_multiple_addresses_without_requests(self):
+        for ips in (("127.0.0.1",), ("8.8.8.8", "1.1.1.1"), ()):
+            with self.subTest(ips=ips), patch.object(s.socket, "getaddrinfo", return_value=[
+                    (s.socket.AF_INET, s.socket.SOCK_STREAM, 6, "", (ip, 443)) for ip in ips]):
+                with self.assertRaisesRegex(RuntimeError, "public VPS IPv4"):
+                    s.lookup_country_code("node.example.com")
+        self.session.get.assert_not_called()
 
 
 if __name__ == "__main__":
