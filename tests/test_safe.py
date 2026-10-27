@@ -302,6 +302,44 @@ class SafeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "intersects"):
             s.add_routes(text, p["domain"], [{"path": spec["path"], "port": 32123, "network": "ws"}])
 
+    def check_nginx_staging(self, reject=False):
+        runtime = object.__new__(s.Runtime)
+        runtime.nginx = {"Id": "actual-nginx"}
+        runtime.nginx_inside = "/etc/nginx/conf.d/default.conf"
+        calls = []
+        staged = "/tmp/egames-nginx-Ab123C.conf"
+        def execute(args, data=None, check=True):
+            calls.append((args, data, check))
+            output = ""
+            if args[-1] == "/etc/nginx/nginx.conf":
+                output = "events {}\nhttp { include /etc/nginx/conf.d/*.conf; }\n"
+            elif "find" in args:
+                output = runtime.nginx_inside + "\n"
+            elif "mktemp" in args:
+                output = staged + "\n"
+            elif "nginx" in args and "-t" in args and reject:
+                raise RuntimeError("synthetic Nginx validation failure")
+            return types.SimpleNamespace(stdout=output, returncode=0)
+        with patch.object(s, "command", side_effect=execute):
+            if reject:
+                with self.assertRaisesRegex(RuntimeError, "synthetic Nginx"):
+                    runtime.validate_nginx(self.rt.nginx_text)
+            else:
+                runtime.validate_nginx(self.rt.nginx_text)
+        self.assertTrue(any("-t" in args and args[-1] == staged for args, _, _ in calls))
+        self.assertFalse(any("/dev/stdin" in args for args, _, _ in calls))
+        write = next((args, data) for args, data, _ in calls if "sh" in args)
+        self.assertIn('umask 077; cat > "$1"', write[0])
+        self.assertIn("events {}", write[1])
+        self.assertIn(self.rt.nginx_text, write[1])
+        self.assertEqual(calls[-1][0][-4:], ["rm", "-f", "--", staged])
+
+    def test_nginx_validator_uses_private_seekable_config(self):
+        self.check_nginx_staging()
+
+    def test_nginx_validator_cleans_staging_after_rejection(self):
+        self.check_nginx_staging(reject=True)
+
     def test_duplicate_and_occupied_ports(self):
         config = self.api.profile["config"]
         bad = copy.deepcopy(config)

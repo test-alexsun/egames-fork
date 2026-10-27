@@ -379,7 +379,20 @@ class Runtime:
         if len(re.findall(pattern, main)) != 1:
             raise RuntimeError("Unsupported Nginx main include structure")
         main = re.sub(pattern, lambda _: "\n".join(includes), main)
-        command(["docker", "exec", "-i", self.nginx["Id"], "nginx", "-t", "-p", "/etc/nginx/", "-c", "/dev/stdin"], main)
+        # Nginx seeks/reopens its config: a pipe-backed /dev/stdin can appear
+        # empty and fail with "no events section" even for a valid main config.
+        # Stage a private regular file inside the actual container, then remove
+        # it on success or failure. The production bind-mounted file is untouched.
+        staged = command(["docker", "exec", self.nginx["Id"], "mktemp",
+                          "/tmp/egames-nginx-XXXXXX.conf"]).stdout.strip()
+        if not re.fullmatch(r"/tmp/egames-nginx-[A-Za-z0-9]+\.conf", staged):
+            raise RuntimeError("Unexpected Nginx staging path")
+        try:
+            command(["docker", "exec", "-i", self.nginx["Id"], "sh", "-c",
+                     'umask 077; cat > "$1"', "sh", staged], main)
+            command(["docker", "exec", self.nginx["Id"], "nginx", "-t", "-p", "/etc/nginx/", "-c", staged])
+        finally:
+            command(["docker", "exec", self.nginx["Id"], "rm", "-f", "--", staged], check=False)
 
     def write_nginx(self, text):
         # A file bind mount pins its inode: os.replace would leave the container on OLD content.
@@ -972,7 +985,7 @@ def run(cfg):
         for spec in p["specs"]:
             print(f"{spec['tag']}: {443 if spec['frontend'] else spec['port']}")
         apply(client, rt, p, directory, state)
-    print("Applied and read back; Node connected, local listeners present, Nginx reloaded.")
+    print("Desired state confirmed by read-back; Node connected, local listeners present, Nginx validated.")
     print("Remote client traffic and subscription content still require an end-to-end client check.")
     print("Active UFW received only missing public rules. Other firewall/provider rules need a separate check.")
     return 0
