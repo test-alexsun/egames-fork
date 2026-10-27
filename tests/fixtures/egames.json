@@ -1,0 +1,34 @@
+{
+  "profile": {
+    "uuid": "10000000-0000-4000-8000-000000000001",
+    "name": "StealConfig",
+    "config": {
+      "log": {"loglevel": "warning"},
+      "dns": {"servers": ["1.1.1.1"]},
+      "policy": {"levels": {"0": {"handshake": 4}}},
+      "inbounds": [{
+        "tag": "Steal", "port": 443, "protocol": "vless",
+        "settings": {"clients": [], "decryption": "none"},
+        "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
+          "dest": "/dev/shm/nginx.sock", "xver": 1,
+          "privateKey": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+          "serverNames": ["node.example.com"], "shortIds": ["0123456789abcdef"]
+        }}
+      }],
+      "outbounds": [{"tag": "DIRECT", "protocol": "freedom"}],
+      "routing": {"rules": []}
+    },
+    "inbounds": [{"tag": "Steal", "uuid": "20000000-0000-4000-8000-000000000001"}]
+  },
+  "nodes": [{
+    "uuid": "30000000-0000-4000-8000-000000000001", "name": "Steal", "address": "127.0.0.1",
+    "isDisabled": false, "isConnected": true, "versions": {"node": "3.4.3", "xray": "26.10.21"},
+    "configProfile": {"activeConfigProfileUuid": "10000000-0000-4000-8000-000000000001",
+      "activeInbounds": [{"uuid": "20000000-0000-4000-8000-000000000001", "tag": "Steal"}]}
+  }],
+  "squads": [{"uuid": "40000000-0000-4000-8000-000000000001", "name": "Default-Squad",
+    "inbounds": [{"uuid": "20000000-0000-4000-8000-000000000001"}]}],
+  "hosts": [{"uuid": "50000000-0000-4000-8000-000000000001", "remark": "Original host", "address": "node.example.com",
+    "port": 443, "tags": [], "inbound": {"configProfileUuid": "10000000-0000-4000-8000-000000000001",
+      "configProfileInboundUuid": "20000000-0000-4000-8000-000000000001"}}]
+}

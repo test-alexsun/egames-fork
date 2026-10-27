@@ -1,8 +1,10 @@
-config.yaml
-*.pyc
 __pycache__/
+*.pyc
 .venv/
 venv/
 .env
 *.log
 .DS_Store
+config.yaml
+.tools/
+test-results/
