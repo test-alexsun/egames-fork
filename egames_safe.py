@@ -26,6 +26,7 @@ from pathlib import Path
 import requests
 
 from remnawave_injector import RemnawaveClient, build_inbound, unwrap_list
+from inbound_tags import allocate, descriptive_tag
 
 OWNER = "EGAMES_ADDON"
 BEGIN = "# BEGIN EGAMES_ADDON"
@@ -86,10 +87,17 @@ def lookup_country_code(domain):
     raise RuntimeError("GeoIP unavailable; set host_country_code to the verified VPS country")
 
 
-def host_remark(tag, code):
+def host_remark(tag, code, label=None):
     code = country_code(code)
     flag = "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code)
-    return f"{flag} | {HOST_LABELS[tag.upper()]}"
+    label = HOST_LABELS.get('EGADDON-' + label) if label else HOST_LABELS.get(tag.upper())
+    if label is None:
+        base = re.sub(r'-\d+$', '', tag)
+        label = {'Vless-WS-tcp': 'VLESS | WS TLS', 'Vless-XHTTP-tcp': 'VLESS | XHTTP TLS',
+                 'Trojan-gRPC-tcp': 'Trojan | gRPC TLS', 'Vless-Reality-tcp': 'VLESS | TCP REALITY ML-KEM768',
+                 'Shadowsocks-TCP+UDP-tcp+udp': 'Shadowsocks | 2022 AES-256-GCM',
+                 'Hysteria2-QUIC-udp': 'Hysteria2 | QUIC TLS'}[base]
+    return f"{flag} | {label}"
 
 
 def command(args, data=None, check=True):
@@ -491,7 +499,7 @@ def profile_patch(profile, config):
 def host_body(spec, profile_uuid, inbound_uuid, domain, node_uuid, code):
     frontend = spec.get("frontend", False)
     return {"inbound": {"configProfileUuid": profile_uuid, "configProfileInboundUuid": inbound_uuid},
-            "remark": host_remark(spec["tag"], code), "address": domain,
+            "remark": host_remark(spec["tag"], code, spec.get('label')), "address": domain,
             "port": 443 if frontend else spec["port"], "sni": domain, "host": domain if frontend else "",
             "path": spec.get("service_name", "") if spec["network"] == "grpc" else spec.get("path", "") if spec["network"] in ("ws", "xhttp") else "",
             "fingerprint": "chrome", "alpn": "h2" if spec["network"] == "grpc" else None,
@@ -630,7 +638,12 @@ def plan(client, rt, cfg, state, occupied):
                    ("PQ", "vless", "raw", "reality", False), ("SS2022", "shadowsocks", "raw", "none", False),
                    ("HY2", "hysteria", "hysteria", "tls", False)]
     for label, proto, net, security, frontend in definitions:
-        tag = f"EGADDON-{label}"
+        if f'EGADDON-{label}' in tags:
+            raise RuntimeError('Unowned inbound or legacy state: migrate before installation')
+        tag = state.get('tag_labels', {}).get(label)
+        if not tag:
+            tag = allocate(descriptive_tag({'protocol': proto, 'settings': {'version': 2},
+                           'streamSettings': {'network': net, 'security': security}}), global_tags | set(tags) | {s['tag'] for s in specs})
         old = tags.get(tag)
         if tag in global_tags or (old and tag not in state.get("tags", [])):
             raise RuntimeError(f"Unowned inbound tag conflict: {tag}")
@@ -653,7 +666,7 @@ def plan(client, rt, cfg, state, occupied):
         if label == "HY2" and ("udp", 443) in occupied and not old:
             diagnostics.append("Hysteria2 skipped: UDP 443 already occupied (QUIC/HTTP3 or another service)")
             continue
-        spec = {"tag": tag, "protocol": proto, "network": net, "security": security, "port": port,
+        spec = {"tag": tag, "label": label, "protocol": proto, "network": net, "security": security, "port": port,
                 "path": path, "service_name": path.strip("/"), "frontend": frontend}
         if old:
             ib = copy.deepcopy(old)
@@ -984,6 +997,8 @@ def apply(client, rt, p, directory, state):
                                     h.get("inbound", {}).get("configProfileUuid") == p["profile"]["uuid"]],
             "paths": {s["tag"]: s["path"] for s in p["specs"]},
             "inbounds": {i["tag"]: i for i in p["config"]["inbounds"] if i["tag"] in tags},
+            "tag_labels": {s['label']: s['tag'] for s in p['specs']},
+            **{k: state[k] for k in ('tag_migration_backup', 'pre_tag_migration_history') if k in state},
             "last_backup": str(backup_path)}
         private_json(Path(directory) / "state.json", new_state)
         tx.data["status"] = "committed"
@@ -1025,11 +1040,38 @@ def run(cfg):
                 recover(client, rt, directory)
             else:
                 state = read_state(directory)
+                if state.get('tag_migration_backup'):
+                    raise RuntimeError('Restore tag migration first using tag_migration.py --restore before uninstalling historical installation')
                 for path in reversed(state.get("history", [])):
                     recover(client, rt, directory, path)
                 print("Managed additions removed through recorded transactions; original components retained.")
         return 0
     state = read_state(directory)
+    if (directory / 'journal.json').exists():
+        if json.loads((directory / 'journal.json').read_text())['status'] not in ('committed', 'rolled_back'):
+            raise RuntimeError('Unfinished installer transaction; run --restore before tag migration')
+    migration_journal = directory / 'tag-migration.json'
+    if migration_journal.exists() and json.loads(migration_journal.read_text())['status'] not in ('committed', 'rolled_back'):
+        raise RuntimeError('Unfinished tag migration; use tag_migration.py --restore')
+    if any(t.startswith('EGADDON-') for t in state.get('tags', [])):
+        from tag_migration import prepare, migrate
+        proposal = prepare(client, state)
+        rt.validate_xray(proposal['config'])
+        print('Inbound tag migration (Hosts, Node, Squad UUID bindings will be restored):')
+        for old, new in proposal['mapping'].items():
+            print(f'{old} -> {new}')
+        if mode in ('dry-run', 'check', 'status'):
+            print('Migration required; read-only validation passed. Run --install to apply.')
+            return 0
+        if mode != 'backup':
+            with lock(directory):
+                state = migrate(client, rt, directory, read_state(directory))
+        else:
+            with lock(directory):
+                path = directory / 'backups' / f'pre-migration-{time.time_ns()}.json'
+                private_json(path, proposal)
+                print(f'Private backup: {path}')
+            return 0
     if (directory / "journal.json").exists():
         journal = json.loads((directory / "journal.json").read_text(encoding="utf-8"))
         if journal["status"] not in ("committed", "rolled_back"):
@@ -1043,7 +1085,7 @@ def run(cfg):
         print(d)
     print("TAG | public port | local port | transport | Host name")
     for s in p["specs"]:
-        print(f"{s['tag']} | {443 if s['frontend'] else s['port']} | {s['port']} | {s['network']} | {host_remark(s['tag'], p['country_code'])}")
+        print(f"{s['tag']} | {443 if s['frontend'] else s['port']} | {s['port']} | {s['network']} | {host_remark(s['tag'], p['country_code'], s.get('label'))}")
     if mode in ("dry-run", "check", "status"):
         print("Read-only plan complete. Xray and Nginx validators passed; no client connection tested.")
         return 0

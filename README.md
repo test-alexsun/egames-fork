@@ -115,13 +115,13 @@ Internet UDP:443             -> Hysteria2, только при выполнен�
 | Inbound/tag | Публичный Host | Реализация / проверка |
 |---|---|---|
 | Существующий Steal / VLESS REALITY Vision | исходный домен:443 | Сохраняется без смены ключей и listener; UUID/flow назначает Panel |
-| `EGADDON-WS` | node domain:443, TLS, случайный path | VLESS WS через существующий Nginx, Upgrade/Connection, timeouts |
-| `EGADDON-XHTTP` | node domain:443, TLS, случайный path | XHTTP auto, buffering off, loopback upstream |
-| `EGADDON-GRPC` | node domain:443, TLS, случайный serviceName | Trojan gRPC, HTTP/2, `grpc_pass`, Host.path = serviceName |
-| `EGADDON-XREALITY` | node domain:выбранный TCP | XHTTP REALITY без Vision; конфиг должен принять установленный Xray |
-| `EGADDON-PQ` | node domain:выбранный TCP | VLESS Encryption ML-KEM-768 + RAW + REALITY, flow пустой; без генератора пропускается |
-| `EGADDON-SS2022` | node domain:выбранный TCP+UDP | `2022-blake3-aes-256-gcm`, криптографический 32-байтный server key |
-| `EGADDON-HY2` | node domain:443 **UDP** | Native `hysteria`, version=2 в protocol и transport; только при доступных Node TLS mounts и свободном UDP443 |
+| `Vless-WS-tcp` | node domain:443, TLS, случайный path | VLESS WS через существующий Nginx, Upgrade/Connection, timeouts |
+| `Vless-XHTTP-tcp` | node domain:443, TLS, случайный path | XHTTP auto, buffering off, loopback upstream |
+| `Trojan-gRPC-tcp` | node domain:443, TLS, случайный serviceName | Trojan gRPC, HTTP/2, `grpc_pass`, Host.path = serviceName |
+| `Vless-XHTTP-tcp-2` | node domain:выбранный TCP | XHTTP REALITY без Vision; конфиг должен принять установленный Xray |
+| `Vless-Reality-tcp` | node domain:выбранный TCP | VLESS Encryption ML-KEM-768 + RAW + REALITY, flow пустой; без генератора пропускается |
+| `Shadowsocks-TCP+UDP-tcp+udp` | node domain:выбранный TCP+UDP | `2022-blake3-aes-256-gcm`, криптографический 32-байтный server key |
+| `Hysteria2-QUIC-udp` | node domain:443 **UDP** | Native `hysteria`, version=2 в protocol и transport; только при доступных Node TLS mounts и свободном UDP443 |
 | VMess WS TLS | Не создаётся | В проверенном backend нет управляемых VMess пользователей и генератора подписки; альтернатива VLESS WS |
 
 Предпочтительный SS2022 AES-128 отсутствует в проверенном адаптере Panel; применяется
@@ -215,13 +215,13 @@ Hosts восстанавливаются с сохранением UUID. Заи�
 | Inbound | Название Host |
 | --- | --- |
 | Steal | 🇫🇮 \| VLESS \| TCP REALITY Vision |
-| EGADDON-WS | 🇫🇮 \| VLESS \| WS TLS |
-| EGADDON-XHTTP | 🇫🇮 \| VLESS \| XHTTP TLS |
-| EGADDON-GRPC | 🇫🇮 \| Trojan \| gRPC TLS |
-| EGADDON-XREALITY | 🇫🇮 \| VLESS \| XHTTP REALITY |
-| EGADDON-PQ | 🇫🇮 \| VLESS \| TCP REALITY ML-KEM768 |
-| EGADDON-SS2022 | 🇫🇮 \| Shadowsocks \| 2022 AES-256-GCM |
-| EGADDON-HY2 | 🇫🇮 \| Hysteria2 \| QUIC TLS |
+| Vless-WS-tcp | 🇫🇮 \| VLESS \| WS TLS |
+| Vless-XHTTP-tcp | 🇫🇮 \| VLESS \| XHTTP TLS |
+| Trojan-gRPC-tcp | 🇫🇮 \| Trojan \| gRPC TLS |
+| Vless-XHTTP-tcp-2 | 🇫🇮 \| VLESS \| XHTTP REALITY |
+| Vless-Reality-tcp | 🇫🇮 \| VLESS \| TCP REALITY ML-KEM768 |
+| Shadowsocks-TCP+UDP-tcp+udp | 🇫🇮 \| Shadowsocks \| 2022 AES-256-GCM |
+| Hysteria2-QUIC-udp | 🇫🇮 \| Hysteria2 \| QUIC TLS |
 
 Страна определяется по публичному IPv4 домена ноды через HTTPS GeoIP (`ipwho.is`,
 резервный сервис `ipinfo.io`), отдельной сессией без токена панели. При ошибке GeoIP,
@@ -336,3 +336,10 @@ GitHub Actions использует Linux mock-tests, POSIX permissions, офи�
 ## Лицензия
 
 MIT, в соответствии с исходным проектом. Официальные компоненты сохраняют свои лицензии.
+
+
+## Формат inbound tag и миграция
+
+Новые установки используют `Протокол-Транспорт-сеть`. Имена выводятся из фактических настроек; коллизии во всех профилях получают суффиксы `-2`, `-3`. Shadowsocks с TCP и UDP получает `Shadowsocks-TCP+UDP-tcp+udp`. REALITY поверх XHTTP остаётся XHTTP; Trojan gRPC не называется VLESS. Базовый inbound не переименовывается.
+
+`egames-fork check` показывает миграцию без изменений; `egames-fork install` применяет её через API Panel, сохраняет и восстанавливает связи Hosts, Nodes и Internal Squads по новым UUID. Host remarks, отключения и ограничения сквадов сохраняются. Секреты и сетевые параметры не меняются. Подробности и откат: [INBOUND_TAG_MIGRATION.md](docs/INBOUND_TAG_MIGRATION.md). Результаты реальной проверки: [TAG_MIGRATION_REPORT.md](TAG_MIGRATION_REPORT.md).

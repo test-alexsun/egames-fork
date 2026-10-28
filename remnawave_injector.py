@@ -190,7 +190,7 @@ def build_inbound(
         raise ValueError(f"Protocol {protocol} has no supported Remnawave user/subscription adapter")
     if spec.get("flow") and network not in ("raw", "tcp"):
         raise ValueError("Vision requires RAW/TCP, not XHTTP/WS/gRPC")
-    if "PQ" in tag.upper() and not spec.get("decryption"):
+    if (spec.get('label') == 'PQ' or "PQ" in tag.upper()) and not spec.get("decryption"):
         raise ValueError("PQ requires actual generated ML-KEM-768 decryption")
 
     inbound: Dict[str, Any] = {
