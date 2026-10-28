@@ -2,6 +2,14 @@
 # Bootstrap a reviewed egames-fork checkout; never reset an existing checkout.
 set -Eeuo pipefail
 umask 077
+if (($#)); then
+    if [[ $# -eq 1 && ( $1 == --help || $1 == -h ) ]]; then
+        printf '%s\n' 'Usage: sudo bash bootstrap.sh' 'Optional: EGAMES_FORK_REF=<full commit SHA> NODE_UUID=<UUID> sudo -E bash bootstrap.sh'
+        exit 0
+    fi
+    printf 'Unexpected arguments; run bootstrap.sh --help.\n' >&2
+    exit 2
+fi
 readonly REPO='https://github.com/test-alexsun/egames-fork.git'
 readonly DEST='/opt/egames-fork'
 readonly LOGDIR='/var/log/egames-fork'
