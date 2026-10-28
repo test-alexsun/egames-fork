@@ -16,13 +16,15 @@ readonly LOGDIR='/var/log/egames-fork'
 readonly CLI='/usr/local/bin/egames-fork'
 stage='initialization'
 fail() { printf '[ERROR] %s: %s\n' "$stage" "$1" >&2; exit 1; }
-trap 'rc=$?; printf "[ERROR] %s failed (exit %s)\n" "$stage" "$rc" >&2' ERR
+trap 'printf "[ERROR] %s failed (exit %s)\n" "$stage" "$?" >&2' ERR
 [[ $EUID -eq 0 ]] || fail 'Run with sudo or as root.'
 [[ -r /etc/os-release ]] || fail 'Cannot identify operating system.'
 # shellcheck disable=SC1091
 . /etc/os-release
 [[ ${ID:-} == debian && ${VERSION_ID:-} == 13 ]] || fail 'Bootstrap supports Debian 13 only.'
-command -v docker >/dev/null && docker info >/dev/null 2>&1 || fail 'Docker is unavailable. Install and verify official eGames first: https://github.com/eGamesAPI/remnawave-reverse-proxy'
+if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then
+    fail 'Docker is unavailable. Install and verify official eGames first: https://github.com/eGamesAPI/remnawave-reverse-proxy'
+fi
 docker compose version >/dev/null || fail 'Docker Compose is unavailable.'
 [[ ! -e "$CLI" ]] || { [[ -f "$CLI" ]] && head -n 2 "$CLI" | grep -q '# egames-fork managed wrapper'; } || fail "Existing $CLI is not owned by egames-fork."
 mkdir -p "$LOGDIR"

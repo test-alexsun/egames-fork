@@ -64,6 +64,8 @@ tag_labels обновлены; повторный запуск использу�
   UUID cascade, routing, потерянные HTTP-ответы, health failures, drift,
   сохранение выключенных Hosts и повторная установка.
 - `.github/workflows/check.yml`: компиляция новых модулей в CI.
+- `bootstrap.sh`: исправлены два замечания ShellCheck в ранее существовавшем
+  bootstrap (trap и неоднозначная конструкция проверки Docker).
 - `README.md`, `docs/INBOUND_TAG_MIGRATION.md`, этот отчёт.
 
 Исторические документы `docs/LIVE_SW126.md` сохранены как снимок прежнего
@@ -116,7 +118,7 @@ tag_labels обновлены; повторный запуск использу�
 | Перезапуск Node / Xray | PASS | docker restart remnanode; последующий API/read-back/listeners PASS |
 | Перезапуск Docker | NOT VERIFIED | Автоматическая проверка разрешений отклонила общий restart; запрос пользователю отправлен |
 | Перезагрузка VPS | NOT VERIFIED | Отдельное подтверждение общего перерыва обслуживания ожидается |
-| GitHub Actions после публикации | NOT VERIFIED | Локальные и Debian-тесты выполнены отдельно |
+| GitHub Actions после публикации | FAIL, исправление отправлено | 67 unit-тестов PASS; исходный запуск остановился на двух замечаниях ShellCheck в bootstrap; итоговый статус см. PR |
 
 Результаты внешнего клиента сохранены локально в
 `audit/client-results-tag-migration-20261028-external.json`; серверные статусы —
