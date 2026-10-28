@@ -1,3 +1,35 @@
+# ПРАВИЛЬНЫЙ ПОРЯДОК УСТАНОВКИ
+
+1. Подготовьте VPS с Debian 13, root или sudo, публичным IPv4, доступом в интернет,
+   достаточными RAM и свободным местом. Рекомендуется свежая система. Направьте DNS
+   доменов панели, подписки и ноды на VPS и откройте необходимые порты.
+2. Установите [официальный eGames](https://github.com/eGamesAPI/remnawave-reverse-proxy),
+   выбрав Panel + Node на одном VPS, Nginx, HTTPS и домены. Для защиты панели
+   можно выбрать cookie authentication. Torrent Blocker и защита от сканеров —
+   отдельные функции официального eGames, этот проект их не устанавливает.
+
+   ```bash
+   bash <(curl -Ls https://raw.githubusercontent.com/eGamesAPI/remnawave-reverse-proxy/refs/heads/main/install_remnawave.sh)
+   ```
+
+3. Убедитесь, что доступны панель и подписка, Node подключена, исходный REALITY
+   работает, сертификаты действительны, контейнеры запущены и Nginx проходит `nginx -t`
+   внутри своего контейнера. Устанавливайте egames-fork только после этих проверок.
+4. После публикации bootstrap в main его можно скачать, просмотреть и запустить:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/test-alexsun/egames-fork/main/bootstrap.sh -o /tmp/egames-fork-bootstrap.sh && sudo bash /tmp/egames-fork-bootstrap.sh
+   ```
+
+   Bootstrap создан, но полноценное интеграционное тестирование на чистом Debian 13
+   пока не завершено. Для воспроизводимости используйте `EGAMES_FORK_REF` с полным
+   SHA проверенного коммита; для проверки самого bootstrap скачайте его по тому же SHA.
+   Существующий checkout с другим коммитом или локальными изменениями не перезаписывается.
+
+После установки доступны `sudo egames-fork check`, `status`, `repair`, `update`,
+`backup`, `restore` и `uninstall`. Проверки реального клиентского подключения и
+формирования подписки автоматически не выполняются и выводятся как NOT TESTED.
+
 # eGames / Remnawave: безопасное дополнение протоколов
 
 Установщик расширяет **существующий активный Config Profile** Remnawave поверх
