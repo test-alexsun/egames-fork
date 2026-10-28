@@ -890,11 +890,14 @@ def bind_hosts_and_node(tx, p, state):
     full = client.get(f"/config-profiles/{p['profile']['uuid']}")
     tag_ids = {i["tag"]: i["uuid"] for i in full["inbounds"]}
     managed_ids = []
+    new_managed_ids = []
     for spec in p["specs"]:
         if spec["tag"] not in tag_ids:
             raise RuntimeError("Missing managed inbound UUID after profile update")
         iid = tag_ids[spec["tag"]]
         managed_ids.append(iid)
+        if spec["tag"] not in state.get("tags", []):
+            new_managed_ids.append(iid)
         body = host_body(spec, full["uuid"], iid, p["domain"], p["node"]["uuid"], p["country_code"])
         saved_id = state.get("host_ids", {}).get(spec["tag"])
         matches = [h for h in p["hosts"] if h.get("uuid") == saved_id] if saved_id else [
@@ -905,13 +908,19 @@ def bind_hosts_and_node(tx, p, state):
             h = matches[0]
             if OWNER not in h.get("tags", []) or h["uuid"] not in state.get("hosts", []):
                 raise RuntimeError("Unowned Host uses a managed inbound; review required")
+            # Disabled status is an operator's access decision, not installer drift.
+            if type(h.get("isDisabled")) is not bool:
+                raise RuntimeError("Managed Host has an invalid disabled status")
+            body["isDisabled"] = h["isDisabled"]
             before = project(h, body)
             tx.api("host", "/hosts", {"uuid": h["uuid"], **before}, {"uuid": h["uuid"], **body})
         else:
             tx.api("host", "/hosts", None, body, "POST")
     for squad in p["squads"]:
         before = writable_squad(squad)
-        after = {**before, "inbounds": list(dict.fromkeys(before["inbounds"] + managed_ids))}
+        # Only enroll newly installed inbounds. An operator may deliberately
+        # remove existing inbounds from a squad to control user access.
+        after = {**before, "inbounds": list(dict.fromkeys(before["inbounds"] + new_managed_ids))}
         tx.api("squad", "/internal-squads", before, after)
     before = writable_node(p["node"])
     after = copy.deepcopy(before)

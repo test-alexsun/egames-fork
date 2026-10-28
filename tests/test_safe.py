@@ -172,6 +172,30 @@ class SafeTests(unittest.TestCase):
         self.assertEqual({h["uuid"]: h["remark"] for h in self.api.hosts}, names)
         self.assertEqual(self.api.writes, [])
 
+    def test_repeat_preserves_operator_exclusions_from_existing_squad(self):
+        self.apply(self.plan())
+        self.state = s.read_state(self.tmp.name)
+        self.rt.nginx_text = self.rt.nginx_path.read_text()
+        squad = self.api.squads[0]
+        squad['inbounds'] = squad['inbounds'][:2]
+        chosen = copy.deepcopy(squad['inbounds'])
+        self.api.writes.clear()
+        self.apply(self.plan())
+        self.assertEqual(squad['inbounds'], chosen)
+        self.assertFalse(any(path == '/internal-squads' for _, path, _ in self.api.writes))
+
+    def test_repeat_preserves_operator_disabled_managed_host(self):
+        self.apply(self.plan())
+        self.state = s.read_state(self.tmp.name)
+        self.rt.nginx_text = self.rt.nginx_path.read_text()
+        host = self.api.hosts[1]
+        host['isDisabled'] = True
+        self.api.writes.clear()
+        self.apply(self.plan())
+        self.assertTrue(host['isDisabled'])
+        self.assertFalse(any(path == '/hosts' and body.get('uuid') == host['uuid']
+                             for _, path, body in self.api.writes))
+
     def test_country_rename_does_not_touch_original_host_on_other_address(self):
         self.api.hosts[0]["address"] = "other.example.com"
         old = copy.deepcopy(self.api.hosts[0])
