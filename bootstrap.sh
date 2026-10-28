@@ -74,6 +74,10 @@ case "$mode" in
     *) echo 'Usage: egames-fork {check|status|repair|update|backup|restore|uninstall|install|dry-run} [options]' >&2; exit 2 ;;
 esac
 if (($#)); then shift; fi
+if [[ -z ${NODE_UUID:-} && -f /var/lib/egames-injector/state.json ]]; then
+    NODE_UUID=$(/opt/egames-fork/.venv/bin/python -c 'import re,sys; sys.path.insert(0,"/opt/egames-fork"); from egames_safe import read_state; v=read_state("/var/lib/egames-injector").get("node_uuid", ""); assert re.fullmatch(r"[0-9a-fA-F-]{36}", v), "invalid saved Node UUID"; print(v)')
+    export NODE_UUID
+fi
 exec bash /opt/egames-fork/install.sh "--$mode" "$@"
 WRAPPER
 chmod 755 "$CLI"
