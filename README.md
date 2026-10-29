@@ -1,345 +1,313 @@
-# ПРАВИЛЬНЫЙ ПОРЯДОК УСТАНОВКИ
+# eGames / Remnawave: дополнение существующей установки
 
-1. Подготовьте VPS с Debian 13, root или sudo, публичным IPv4, доступом в интернет,
-   достаточными RAM и свободным местом. Рекомендуется свежая система. Направьте DNS
-   доменов панели, подписки и ноды на VPS и откройте необходимые порты.
-2. Установите [официальный eGames](https://github.com/eGamesAPI/remnawave-reverse-proxy),
-   выбрав Panel + Node на одном VPS, Nginx, HTTPS и домены. Для защиты панели
-   можно выбрать cookie authentication. Torrent Blocker и защита от сканеров —
-   отдельные функции официального eGames, этот проект их не устанавливает.
+**Статус ветки: NOT READY для production.** Исправления review подготовлены
+для проверки; системные acceptance gates ещё открыты.
+Итог: [CODEX_04_RELEASE](docs/CODEX_04_RELEASE.md),
+[общий план внедрения](docs/PRODUCTION_DEPLOYMENT.md).
 
-   ```bash
-   bash <(curl -Ls https://raw.githubusercontent.com/eGamesAPI/remnawave-reverse-proxy/refs/heads/main/install_remnawave.sh)
-   ```
+Проект расширяет активный Config Profile через API Remnawave. Не переустанавливает
+Panel/Node, не редактирует БД и runtime Node, не создаёт пользователей, не меняет
+существующие ключи и сертификаты. Текущая реализация и ограничения:
+[CODEX_02_IMPLEMENTATION.md](docs/CODEX_02_IMPLEMENTATION.md).
 
-3. Убедитесь, что доступны панель и подписка, Node подключена, исходный REALITY
-   работает, сертификаты действительны, контейнеры запущены и Nginx проходит `nginx -t`
-   внутри своего контейнера. Устанавливайте egames-fork только после этих проверок.
-4. После публикации bootstrap в main его можно скачать, просмотреть и запустить:
+## Совместимость
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/test-alexsun/egames-fork/main/bootstrap.sh -o /tmp/egames-fork-bootstrap.sh && sudo bash /tmp/egames-fork-bootstrap.sh
-   ```
-
-   Bootstrap создан, но полноценное интеграционное тестирование на чистом Debian 13
-   пока не завершено. Для воспроизводимости используйте `EGAMES_FORK_REF` с полным
-   SHA проверенного коммита; для проверки самого bootstrap скачайте его по тому же SHA.
-   Существующий checkout с другим коммитом или локальными изменениями не перезаписывается.
-
-После установки доступны `sudo egames-fork check`, `status`, `repair`, `update`,
-`backup`, `restore` и `uninstall`. Проверки реального клиентского подключения и
-формирования подписки автоматически не выполняются и выводятся как NOT TESTED.
-При нескольких нодах CLI использует UUID ноды, сохранённый после установки; для
-первой установки нужную ноду можно указать переменной `NODE_UUID`.
-
-# eGames / Remnawave: безопасное дополнение протоколов
-
-Установщик расширяет **существующий активный Config Profile** Remnawave поверх
-eGames Panel + Node + Nginx на одном VPS. Сохраняет TCP 443, исходные inbound,
-outbounds, DNS, routing, policy, Hosts, сертификаты и защиту панели.
-
-История исправлений: [docs/AUDIT.md](docs/AUDIT.md). Реальная установка на Debian 13,
-подписка, внешние подключения и рестарт проверены 27 октября 2026:
-[docs/LIVE_SW126.md](docs/LIVE_SW126.md). Результаты относятся к указанным версиям
-и одному VPS; синтаксическая проверка сама по себе не подтверждает клиентский трафик.
-
-Для предварительного анализа переименования технических inbound-тегов внутри
-сквадов доступен [автономный планировщик](docs/INBOUND_TAG_MIGRATION.md).
-Он не изменяет панель; автоматическое применение миграции ещё не реализовано.
-
-## Требования и границы совместимости
-
-| Компонент | Условия |
+| Компонент | Граница адаптера |
 |---|---|
-| ОС | Debian 13 (приоритет), Debian 12, Ubuntu 24.04; системные интеграционные тесты ещё нужны |
-| Panel | Адаптер проверен по исходникам **3.4.7**; другие версии останавливают применение |
-| Node | Адаптер проверен по исходникам **3.4.3**; версия должна сообщаться Panel |
-| Xray | На VPS **26.7.28**, внешний клиент **26.10.21**; проверяется тот core, который запускает Node |
-| Nginx | Схема eGames с `unix:/dev/shm/nginx.sock ssl proxy_protocol`, HTTP/2; на VPS проверен **1.30.6** |
-| Docker | На VPS Engine **29.9.2**, Compose **5.6.1**; Node/Nginx в host network, API Panel доступен локально |
-| Python | Python 3.10+; `requests`, `PyYAML`, `cryptography` из requirements.txt |
-| Прочее | `ip`, `ss`, root для применения; действующий администраторский API-токен |
+| Основной режим | Panel + Node + Subscription + Nginx на одном VPS; Node/Nginx host networking, общий `/dev/shm` |
+| ОС / Python | Bootstrap: Debian 13. Lockfile и CI: CPython 3.13; другие Python не квалифицированы |
+| Panel / Node | Только 3.4.7 / 3.4.3; неизвестные версии блокируются |
+| Xray | Проверяется реальный бинарник Node; синтаксические тесты 26.10.21, сетевой acceptance новых версий обязателен |
+| Nginx | eGames Unix TLS + PROXY protocol, явный `http2 on` для gRPC |
+| Node-only | Только read-only inventory/check/status/dry-run через явный HTTPS API удалённой Panel |
 
-Engine/Compose проверяются реальными `docker inspect`, `docker compose version` и
-доступностью контейнеров, без заявления о тестировании всех их версий. jq и OpenSSL CLI
-не нужны: JSON/YAML разбираются структурно, сертификаты проверяются cryptography.
+Shared profile, manual clients, snippets, неоднозначные контейнеры/Node и
+неподдерживаемая топология блокируют изменения. Поддержка старых OS guards
+в Python не означает проведённых системных испытаний на этих ОС.
 
-Caddy, удалённая Node, общий профиль нескольких нод, неоднозначный
-выбор контейнеров/ноды и нестандартная структура Nginx требуют отдельного адаптера.
-При таких условиях установщик прекращает применение с диагностикой.
+Сертификаты должны быть видимы через directory mounts с корректным live/archive
+lineage. Отдельные certificate/key file bind mounts блокируют применение: при
+ACME rotation они удерживают старый inode. Сравниваются текущий публичный сертификат
+на хосте и в Nginx, файлы TLS в Node. Установщик не исправляет Compose/mounts или
+renewal hooks автоматически. Нужен отдельный стендовый renewal acceptance.
 
-В рабочей ветке `audit/sw126-live-20261027` добавлен адаптер сохранения встроенных
-Node Plugins (Torrent Blocker, Ingress/Egress Filter) для Panel 3.4.7 / Node 3.4.3.
-Он читает `pluginConfig` по UUID, требует NET_ADMIN и проверяет, что привязка и
-конфигурация плагина не изменились перед применением и после синхронизации.
-Объекты плагинов не записываются. Lifecycle hooks, shared lists, неизвестные поля
-и включённый Connection Drop блокируют применение. На VPS проверено сохранение
-плагина при установке и рестарте, Ingress Filter с 271 записью, реальная блокировка
-BitTorrent из изолированного namespace и появление отчёта в панели.
+## Установка после eGames
 
-## DNS и сеть
+### Сервер и Debian 13
 
-```text
-panel.example.com -> VPS_IP
-sub.example.com   -> VPS_IP
-node.example.com  -> VPS_IP
-```
-
-Допустим корневой домен selfsteal вместо `node.example.com`. DNS не изменяется.
-Домен Node берётся из существующего REALITY serverNames; адрес управления Node
-вроде `172.30.0.1` не используется как публичный адрес Host.
-
-```text
-Internet TCP:443 -> существующий Xray REALITY
-                    |-- VLESS REALITY / Vision (существующие пользователи Panel)
-                    `-- /dev/shm/nginx.sock, TLS + PROXY protocol
-                          |-- panel domain -> Panel (защита сохранена)
-                          |-- sub domain   -> Subscription Page
-                          `-- node/selfsteal domain
-                                |-- сайт-прикрытие
-                                |-- случайный WS path    -> loopback Xray VLESS WS
-                                |-- случайный XHTTP path -> loopback Xray VLESS XHTTP
-                                `-- gRPC serviceName     -> loopback Xray Trojan gRPC
-
-Internet отдельные TCP       -> XHTTP REALITY / VLESS PQ
-Internet отдельный TCP+UDP   -> Shadowsocks 2022
-Internet UDP:443             -> Hysteria2, только при выполнении условий
-```
-
-Дополнительный публичный HTTPS listener не создаётся. Новые HTTP-транспорты используют
-локальный TCP, общий Unix socket исходного eGames сохраняется. Дополнительные UDS и
-их lifecycle/ownership adapter пока не реализованы; широкие chmod/chown не применяются.
-
-## Протоколы и итоговые Hosts
-
-| Inbound/tag | Публичный Host | Реализация / проверка |
-|---|---|---|
-| Существующий Steal / VLESS REALITY Vision | исходный домен:443 | Сохраняется без смены ключей и listener; UUID/flow назначает Panel |
-| `Vless-WS-tcp` | node domain:443, TLS, случайный path | VLESS WS через существующий Nginx, Upgrade/Connection, timeouts |
-| `Vless-XHTTP-tcp` | node domain:443, TLS, случайный path | XHTTP auto, buffering off, loopback upstream |
-| `Trojan-gRPC-tcp` | node domain:443, TLS, случайный serviceName | Trojan gRPC, HTTP/2, `grpc_pass`, Host.path = serviceName |
-| `Vless-XHTTP-tcp-2` | node domain:выбранный TCP | XHTTP REALITY без Vision; конфиг должен принять установленный Xray |
-| `Vless-Reality-tcp` | node domain:выбранный TCP | VLESS Encryption ML-KEM-768 + RAW + REALITY, flow пустой; без генератора пропускается |
-| `Shadowsocks-TCP+UDP-tcp+udp` | node domain:выбранный TCP+UDP | `2022-blake3-aes-256-gcm`, криптографический 32-байтный server key |
-| `Hysteria2-QUIC-udp` | node domain:443 **UDP** | Native `hysteria`, version=2 в protocol и transport; только при доступных Node TLS mounts и свободном UDP443 |
-| VMess WS TLS | Не создаётся | В проверенном backend нет управляемых VMess пользователей и генератора подписки; альтернатива VLESS WS |
-
-Предпочтительный SS2022 AES-128 отсутствует в проверенном адаптере Panel; применяется
-поддерживаемый AES-256. Внешний Hysteria-сервис не устанавливается: проверенный
-Xray/Panel уже имеют native support, а при отсутствии prerequisites выводится причина пропуска.
-
-Все новые inbound сначала проверяются **установленным** Xray. Непринятый optional
-inbound пропускается с явной причиной; записи-заглушки не создаются. Таблица CLI
-показывает фактический выбранный набор и реальные порты конкретного запуска.
-
-UUID, Trojan passwords и пользовательские SS/Hysteria credentials принадлежат
-пользователям Remnawave и назначаются самой Panel. Установщик не создаёт отдельного
-скрытого пользователя и не внедряет UUID из модели 3x-ui. Hosts связываются с UUID
-inbound профиля; новые inbound добавляются в activeInbounds выбранной ноды и в те
-Internal Squads, где уже разрешён исходный 443.
-
-| Порт | Владелец / правило |
-|---|---|
-| TCP 443 | Исходный Xray, без переноса на Nginx Stream |
-| UDP 443 | Только HY2 и только если свободен; HTTP3/QUIC может конфликтовать |
-| Случайные loopback TCP 20000–59999 | WS/XHTTP/gRPC; наружу не открываются |
-| Отдельные TCP 20000–59999 | XHTTP REALITY и PQ; проверка занятости перед применением |
-| Отдельный TCP+UDP 20000–59999 | SS2022 |
-
-Активный UFW получает только отсутствующие public rules с комментарием `EGAMES_ADDON`.
-Неактивный UFW не включается; nftables, firewalld и firewall провайдера автоматически
-не меняются. Их доступность нужно проверить отдельно. Firewall не сбрасывается.
-
-## Установка и проверка
-
-Сначала установите исходный eGames, выбрав Panel + Node на одном VPS и Nginx,
-и убедитесь, что панель, подписки и исходный REALITY уже работают. Здесь не выполняется
-переустановка eGames или базы данных.
-
-Подготовка зависимостей в checkout (PEP 668 совместимо с Debian 13):
+Нужен Debian 13 VPS с root/sudo, доступом к apt/GitHub/PyPI,
+синхронизированным временем и местом для полного backup. Дополнение требует
+минимум 20 MiB для своей транзакции; это не sizing Panel/БД. CPU/RAM выбираются
+по требованиям upstream и нагрузке; нагрузочные испытания ветки не проведены.
 
 ```bash
+cat /etc/os-release
+timedatectl status
+df -h /
 sudo apt-get update
-sudo apt-get install -y git python3 python3-venv iproute2
-git clone https://github.com/test-alexsun/egames-fork.git
-cd egames-fork
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+sudo apt-get install -y ca-certificates git curl python3 python3-venv iproute2 util-linux
 ```
 
-Для воспроизводимости зафиксируйте проверенный commit после clone и сначала
-испытайте checkout на тестовом VPS. Используйте install.sh из этого checkout:
-сохранённая ранее копия установщика может не содержать исправлений аудита.
+Сохраните SSH-доступ и консоль провайдера. Firewall/SSH настраиваются по политике
+владельца. Не открывайте Panel/PostgreSQL/Node management всему Интернету.
 
-Одна команда диагностики после подготовки checkout:
+### Исходный eGames и Panel + Node
+
+Изученный upstream eGames: `93e6631aae5f7bff28eadfc45faab43150cc22c6`
+(reference 3.8.3). Это идентификатор исходников, не квалификация всех загрузок
+его установщика. Не выполняйте непроверенный `curl | bash` от root.
 
 ```bash
-sudo bash install.sh --dry-run
+git clone --no-checkout https://github.com/eGamesAPI/remnawave-reverse-proxy.git egames-upstream
+git -C egames-upstream checkout --detach 93e6631aae5f7bff28eadfc45faab43150cc22c6
+git -C egames-upstream rev-parse HEAD
+less egames-upstream/install_remnawave.sh
+# После проверки скрипта, модулей и загрузок владельцем стенда:
+sudo bash egames-upstream/install_remnawave.sh
 ```
 
-Токен автоматически читается из `/usr/local/remnawave_reverse/token`; путь можно
-переопределить через config. Если поддерживаемого токена нет, используется скрытый
-интерактивный ввод; в non-interactive режиме — отказ с инструкцией. Токен страницы
-подписки не принимается автоматически за администраторский. Пути Nginx и cert/key,
-network/mounts, контейнеры и API port обнаруживаются из Docker inspect и профиля.
+В меню upstream выберите совместные **Panel + Node**, subscription page и
+**Nginx**. Подготовьте три доменных имени: Panel, подписки, selfsteal Node.
+Проверьте установленные Panel 3.4.7 / Node 3.4.3: moving images upstream могут
+дать другие версии, которые addon отклонит. Сначала проверьте вход в Panel,
+gateway/cookie protection, connected Node, исходный TCP443 REALITY и подписку.
+Addon не переводит Caddy/3x-ui в поддерживаемую топологию.
 
-Запуск без флагов также означает **dry-run**. Диагностика не устанавливает пакеты,
-не создаёт backup/state, не меняет API-объекты/конфиги и не перезапускает сервисы.
-Выполняются read-only Docker/API вызовы и штатные тесты конфигураций.
+### DNS и Nginx
 
-Для `nginx -t` временный конфиг создаётся внутри обнаруженного контейнера через
-`mktemp` с правами 0600 и удаляется в `finally`. Использование `/dev/stdin` для
-основного конфига Nginx на реальном Debian-контейнере оказалось несовместимым:
-проверка возвращала `no "events" section`, хотя исходный конфиг содержал `events`.
-Рабочий bind-mounted конфиг предварительная проверка не изменяет.
+Создайте A трёх имён на VPS; AAAA — только при рабочем IPv6. Node endpoint
+должен указывать прямо на VPS, без HTTP CDN proxy. Проверьте DNS снаружи,
+SAN и сроки сертификатов. Доступность HTTP-01 зависит от выбранного ACME challenge.
+
+Nginx принимает TLS + PROXY protocol через `/dev/shm/nginx.sock`, Xray владеет
+TCP443. В selfsteal server нужен `http2 on;`, host networking и общий `/dev/shm`.
+Сохраните защищённые Panel/API/subscription locations; fixture из tests не
+заменяет production config. Проверка: `docker exec <NGINX_CONTAINER> nginx -t`.
+TLS lineage монтируется каталогами с live symlink и archive target; cert/key
+должны читаться в Nginx и Node. Отдельные certificate file binds блокируются.
+Renewal hook, обслуживаемый serial и HY2 reload проверяются на стенде отдельно.
+
+### Дополнение одной командой
+
+Сначала установите и проверьте [официальный eGames](https://github.com/eGamesAPI/remnawave-reverse-proxy):
+исходный REALITY, защищённые Panel/Subscription, сертификаты и подключение Node.
+Bootstrap не устанавливает eGames, Docker или плагины.
+
+Скачайте `bootstrap.sh` из проверенного полного commit SHA и изучите его. После
+публикации этого коммита установка выполняется одной командой:
+
+```bash
+sudo env EGAMES_FORK_REF=<FULL_REVIEWED_SHA> bash ./bootstrap.sh
+```
+
+Bootstrap требует тот же SHA для исходников и собственного содержимого; moving
+`main` не принимается. Существующий checkout `/opt/egames-fork` с другим SHA,
+чужим origin или локальными изменениями не перезаписывается. Создаются venv,
+зависимости по `requirements.lock`, приватный backup и CLI wrapper. Перед записью
+показывается точный план и требуется `APPLY`. Для заранее согласованного запуска
+есть `--yes`; `--dry-run` готовит зависимости и показывает план без изменения
+Remnawave/Nginx/firewall. Ошибки применения вызывают guarded rollback.
+
+Рекомендуемый SHA для проверки указан в CODEX_04; production SHA пока не одобрен.
+Полный SHA публичного кандидата указан в CODEX_04_RELEASE.
+Для проверки перенесённого checkout на отдельном стенде:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock
+sudo bash install.sh --dry-run
+sudo bash install.sh --install
+```
+
+Admin token читается из `/usr/local/remnawave_reverse/token`, явного `token_file`
+или `PANEL_API_TOKEN`. Token/config/cookie файлы должны принадлежать запускающему
+пользователю, иметь 0600 и не содержать symlink в пути. Не передавайте секреты
+в аргументах команд. Для YAML: `sudo chmod 600 config.yaml` и соответствующий owner.
+`config.example.yaml` содержит поддерживаемые переопределения. При нескольких Node
+нужен `NODE_UUID` либо `node_uuid` в config. Домен берётся из существующего REALITY;
+country code можно задать явно, иначе используется отдельный HTTPS GeoIP-запрос.
+
+## Протоколы и имена
+
+| Возможность | Реализация | По умолчанию |
+|---|---|---|
+| VLESS REALITY Vision | Существующий TCP443, сохранение ключей и UUID; flow проверяется по правилам Panel | Обязательный baseline |
+| VLESS WS TLS | Loopback Xray + TLS в существующем Nginx | WS: required |
+| VLESS XHTTP TLS | Loopback, XHTTP auto, buffering off | XHTTP: required |
+| VLESS XHTTP REALITY | Прямой отдельный TCP, без Vision | XREALITY: required |
+| Trojan gRPC TLS | Loopback, Nginx HTTP/2, Host.path=serviceName | GRPC: required |
+| Shadowsocks 2022 | AES-256-GCM, 32-byte server key, TCP+UDP | SS2022: required |
+| Hysteria2 | Native Xray/Panel `hysteria` version 2, UDP443, проверенные TLS mounts | HY2: optional |
+| VLESS Encryption | Реальный ML-KEM-768 generator, RAW+REALITY, пустой flow | PQ: optional |
+
+`required_protocols` позволяет потребовать HY2/PQ или изменить набор. Отсутствие
+required capability завершает preflight до записи. Строка `CAPABILITIES` содержит
+JSON status/required/reason для каждого варианта. VMess и фиктивные PQ не создаются.
+
+Новые technical tags: `Vless-WS -tcp`, `Vless-XHTTP -tcp`, `Trojan-gRPC -tcp`,
+`Vless-XHTTP -tcp-2`, `Vless-Reality -tcp`, `Shadowsocks-TCP+UDP -tcp+udp`,
+`Hysteria2-QUIC -udp`. Пробел поддерживается контрактом Panel и реальным Xray
+validator. Коллизии проверяются во всех профилях; label→tag сохраняется в state.
+
+Существующие technical tags, включая `EGADDON-*`, сохраняются. В Panel 3.4.7
+rename удаляет inbound и создаёт новый UUID; этот путь отключён по требованию
+сохранить объект. [Планирование имён и ограничения](docs/INBOUND_TAG_MIGRATION.md).
+Существующие descriptive tags не переименовываются ради добавления пробела.
+
+Новые inbound включаются только в выбранную Node и сквады исходного TCP443.
+Повторный запуск сохраняет выключенные Hosts, исключения Squad/Node, UUID,
+credentials, лимиты и неизвестные поля API. UFW получает правила только для новых
+публичных inbound. Source-restricted, DENY и IPv4-only конфликты не расширяются
+молча; внешний firewall/provider имеет статус `not-tested`.
+
+## Команды и восстановление
+
+### Порты и порядок Hosts
+
+| Назначение | Порт / доступ |
+|---|---|
+| Vision и frontend WS/XHTTP/gRPC | TCP443, публичный |
+| HY2 при доступной capability | UDP443, публичный |
+| XHTTP REALITY и PQ | Отдельный TCP для каждого из 20000–59999 |
+| SS2022 | Один номер из 20000–59999, TCP + UDP |
+| WS/XHTTP/gRPC backends | По одному loopback TCP из 20000–59999 |
+| Panel / Subscription upstream | Обычно loopback TCP3000 / 3010; сверить Compose |
+| Node management | TCP2222, только от Panel/доверенной сети |
+| SSH / ACME | По политике сервера и выбранному challenge |
+
+Точные порты выдаёт CHANGE PLAN, номера из старых live-отчётов не являются
+defaults. Provider firewall и IPv6 проверяйте отдельно.
+
+Порядок: baseline Host → Config Profile → получить inbound UUID через API →
+по одному Host на новый endpoint → новые UUID в исходные Squads и выбранную
+Node → runtime verification → state. Исходному Host меняется только remark.
+TLS frontend Host использует публичный 443, TLS securityLayer и path/serviceName;
+прямые transports — свой public port. Hosts создаёт installer, вручную
+дублировать их не нужно. Country remark можно задать `host_country_code`.
+Дубликаты binding и смена сохранённого UUID блокируют повтор до writes.
+
+### Проверка подписок и клиентских подключений
+
+Сохраните до/после Host UUID, inbound UUID, disabled flags и memberships.
+Получите подписку тестового пользователя через приватный URL: HTTP200,
+выбранный формат, разрешённые Hosts, SNI/path/ALPN, отсутствие дублей и
+запрещённых endpoint. Не публикуйте subscription URL/UUID/passwords/выдачу
+клиента. Enabled Host без разрешающего Squad не даёт пользователю доступа.
+Сверьте Xray JSON и URI; sing-box/Clash поддерживают не все варианты.
+
+В Happ импортируйте тестовую подписку, запишите версии Happ/core, проверьте
+каждый разрешённый endpoint: handshake, внешний IP, HTTPS download/upload,
+DNS и reconnect. Для SS отдельно TCP/UDP, HY2 — UDP, XHTTP — длительный upload.
+Сопоставьте время запроса с Node/Nginx logs и реальным outbound traffic.
+Отключённые Hosts/доступы ради теста не включайте. Acceptance итоговой ветки
+ещё не выполнен и обязателен перед production approval.
+
+### Обновление, удаление, Backup/Restore и Rollback
 
 ```bash
 sudo bash install.sh --check
 sudo bash install.sh --status
+sudo bash install.sh --backup
 sudo bash install.sh --install
 sudo bash install.sh --repair
 sudo bash install.sh --update
-```
-
-`--install`, `--repair` и `--update` сверяют один и тот же желаемый набор. Повторный
-запуск сохраняет ключи, пути, порты, UUID Hosts. Внешние изменения собственного inbound
-или managed Nginx-блока приводят к отказу вместо перезаписи. Испорченные поля собственных
-Hosts восстанавливаются с сохранением UUID. Заимствование чужих объектов по remark запрещено.
-Повторное применение сохраняет выбранные оператором исключения inbound из сквадов
-и отключённое состояние существующих Hosts. Новые управляемые inbound добавляются
-в соответствующие сквады при первоначальной установке.
-
-Отображаемые названия Hosts в панели и подписках имеют единый формат:
-`флаг страны | протокол | транспорт и защита`. Пример для VPS в Финляндии:
-
-| Inbound | Название Host |
-| --- | --- |
-| Steal | 🇫🇮 \| VLESS \| TCP REALITY Vision |
-| Vless-WS-tcp | 🇫🇮 \| VLESS \| WS TLS |
-| Vless-XHTTP-tcp | 🇫🇮 \| VLESS \| XHTTP TLS |
-| Trojan-gRPC-tcp | 🇫🇮 \| Trojan \| gRPC TLS |
-| Vless-XHTTP-tcp-2 | 🇫🇮 \| VLESS \| XHTTP REALITY |
-| Vless-Reality-tcp | 🇫🇮 \| VLESS \| TCP REALITY ML-KEM768 |
-| Shadowsocks-TCP+UDP-tcp+udp | 🇫🇮 \| Shadowsocks \| 2022 AES-256-GCM |
-| Hysteria2-QUIC-udp | 🇫🇮 \| Hysteria2 \| QUIC TLS |
-
-Страна определяется по публичному IPv4 домена ноды через HTTPS GeoIP (`ipwho.is`,
-резервный сервис `ipinfo.io`), отдельной сессией без токена панели. При ошибке GeoIP,
-нескольких IPv4 или непубличном адресе укажите проверенный ISO-код страны в
-`config.yaml`, например `host_country_code: "FI"`. Этот override отключает GeoIP-запросы.
-Диагностика показывает будущие названия; изменения применяются через `--install`,
-`--repair` или `--update` и сохраняются при повторном запуске.
-
-Для исходного Host на REALITY TCP 443 изменяется только `remark`, если он привязан
-к исходному inbound активного профиля и его адрес совпадает с доменом ноды.
-Его UUID, теги и остальные поля сохраняются; эта правка включена в журнал отката.
-Технические inbound tags и конфигурация соединений для переименования не меняются.
-
-`--install` применяет изменения профиля через Panel (она синхронизирует Xray) и
-перезагружает только конфигурацию Nginx. Это команда применения на VPS; автоматический
-запуск этих действий на production в ходе аудита не выполнялся.
-
-Если однозначное обнаружение невозможно, используйте только необходимые overrides:
-
-```bash
-cp config.example.yaml config.yaml
-chmod 600 config.yaml
-sudo bash install.sh -c config.yaml --dry-run
-```
-
-Старый `target_inbounds` config отклоняется: он описывал небезопасный standalone TLS
-и фиктивный PQ. Старые `fix-*.py` теперь используют единый транзакционный сценарий:
-без `--apply` диагностика, с `--apply` repair. Bash recovery entrypoints также по
-умолчанию диагностические, без принудительных остановок/удалений.
-
-## Backup, rollback и удаление
-
-Состояние `/var/lib/egames-injector/`: `state.json`, `journal.json`, `backups/`,
-`transactions/`. Файлы сразу создаются с 0600, каталоги с 0700; они содержат секреты
-профиля и не предназначены для публикации.
-
-```bash
-sudo bash install.sh --backup
 sudo bash install.sh --restore
 sudo bash install.sh --uninstall
 ```
 
-Перед записью сохраняются snapshot и журнал намерений. После API-операций выполняется
-GET для проверки фактического результата. Неясный HTTP timeout сверяется с API,
-а не считается автоматически ни успехом, ни отказом. При ошибке дальнейшее применение
-прекращается и выполненные операции откатываются в обратном порядке.
+Без флагов выполняется dry-run. `--repair` и `--update` согласуют конфигурацию и
+Hosts; не обновляют Git, Docker images, пользователей или разрешения существующих
+inbound. Для автоматизации есть явный `--yes`. После bootstrap те же режимы
+доступны как `egames-fork check`, `egames-fork repair` и т. д.
 
-`--restore` откатывает последнюю транзакцию. `--uninstall` проходит историю своих
-транзакций в обратном порядке; существующие до установки объекты сохраняются.
-Произвольный файл из `--backup` автоматически не импортируется — это ручной snapshot.
+Backup — приватный JSON snapshot профиля/Hosts/Node/Squads/Nginx/plugin, не backup
+PostgreSQL, Compose или сертификатов. Произвольный snapshot автоматически не
+импортируется. `--restore` компенсирует последнюю транзакцию; `--uninstall` проходит
+свою историю в обратном порядке. Восстановление не затирает внешний drift и не
+удаляет новые чужие привязки. При `Rollback INCOMPLETE` сохраните journal/state,
+восстановите API/диск и повторите recovery после сверки состояния.
 
-Если внешний администратор изменил объект после установки, rollback не затирает его:
-появится **Rollback INCOMPLETE**, журнал сохранится, дальнейшая установка блокируется.
-Не удаляйте журнал или состояние для обхода ошибки; сопоставьте изменения и backup.
-Read-back подтверждает объекты/файлы, но не реальный клиентский трафик.
+Журналы schema 2 связаны с установкой и epoch. Старые журналы до этой версии,
+результаты UUID-changing tag migration и чужие установки автоматически не
+восстанавливаются. Сохраняйте старые backups для отдельного аудита. Не удаляйте
+journal и не подменяйте schema/epoch для обхода guard.
 
-Nginx конфиг, смонтированный отдельным файлом, записывается с сохранением inode:
-`os.replace` на хосте оставил бы контейнер на старом bind-mounted inode. Перед записью
-проверяется staged-конфиг, сохраняется backup; после записи выполняются `nginx -t` и reload.
-Сам журнал/состояние записываются через атомарную замену. После reboot профиль остаётся
-в Panel, routes — в исходном Nginx source, правила UFW — persistent; reboot-тест ещё нужен.
+Nginx file bind mount записывается с сохранением inode, с durable intent и
+распознаванием только возможного частичного overwrite. Recovery не требует
+работающих Node/Nginx или прежнего Docker Id. При остановленном Nginx восстанавливает
+файл без запуска сервиса; validate/start выполняются отдельно. При недоступной Panel
+локальный Nginx можно восстановить, но API rollback останется incomplete.
 
-## Обновление
+Panel API не имеет CAS/revision precondition: остаётся узкое окно между GET и PATCH.
+Применение требует окна без параллельного редактирования Panel. Installer locks
+защищают другие экземпляры installer, включая разные state-dir, но не Panel UI.
 
-Сначала `--check` и `--backup`. Обновляйте исходники обычным Git workflow после проверки
-локальных изменений; установщик не выполняет `git reset --hard`, не скачивает скрипт
-поверх checkout и не включает ежедневный таймер. Затем обновите venv и выполните
-`--dry-run`, после проверки — `--update`. При обновлении Panel/Node до неизвестной
-версии сначала требуется ревизия адаптера и генераторов подписок.
+## Node-only
 
-## Типичные ошибки
+Поддержано только диагностическое чтение уже подготовленной Node. Установка
+Node-only самим upstream и отдельно подготовленная Node не подтверждают addon Node-only apply.
+Node-only backup/restore/repair/update/uninstall и миграция scoped tags запрещены.
 
-| Сообщение | Действие |
-|---|---|
-| `no reviewed adapter` | Установленная версия ещё не проверена; не обходить guard сменой номера версии |
-| `Ambiguous/missing ...` | Указать UUID/контейнер в config; первая попавшаяся нода не выбирается |
-| `Selected ... does not refer to this VPS` | Нода удалённая или неверно выбрана; проверить топологию |
-| `No Docker mount exposes ...` | Требуемый путь не виден контейнеру; сначала спроектировать корректный mount |
-| `Hysteria2 skipped` | Посмотреть причину: UDP443, certificates или Xray validation; TCP443 сохраняется |
-| `Unowned inbound tag conflict` | Старый/чужой объект не присваивается дополнению; нужна отдельная миграция |
-| `Nginx routes ... modified` | Сопоставить внешние правки с managed block; установщик их не затирает |
-| `API HTTP 401/403` | Проверить срок/права admin API-token; response body с секретами не печатается |
-| `unfinished transaction` | Выполнить `--restore`, сохранить журнал при неполном откате |
-
-После применения проверьте доступность панели по её обычной защищённой ссылке,
-реальную пользовательскую ссылку подписки и соединение **с внешнего клиента** по каждому
-созданному Host. Корень subscription-сайта сам по себе не является тестом подписки.
-Дополнение проверяет конфиги, API read-back, connected Node и локальные listeners;
-автоматического end-to-end теста подписки и клиента внутри CLI пока нет.
-Отдельный аудит подтвердил все восемь профилей до и после рестарта;
-первые отказы и успешные повторы сохранены, поскольку сеть VPS давала тайм-ауты.
-
-## Автоматические тесты
-
-```bash
-python3 -m unittest discover -s tests -v
-for script in *.sh tests/*.sh; do bash -n "$script"; done
-shellcheck *.sh tests/nginx-docker.sh
-XRAY_BINARY=/path/to/verified/xray NGINX_BINARY=/path/to/nginx python3 tests/validate_binaries.py
+```yaml
+topology: node-only
+panel_api_url: https://panel.example.com/api
+token_file: /root/panel-api-token
+node_uuid: <REMOTE_NODE_UUID>
+# cookie_file: /root/existing-panel-gateway-cookie
 ```
 
-Fixtures не требуют production VPS. Проверяются сохранение профиля, отсутствие дублей,
-dry-run, повторная установка, Host repair, backup/restore/uninstall, API failures/timeouts,
-несовместимые версии, конфликты TCP/UDP, missing mounts/certificates и внешний drift.
+`--check --config config.yaml` читает удалённую Panel и локальные Node/Nginx,
+сверяет UUID с адресами VPS, версии и действующий профиль. Локальная Panel не
+ищется, обход её защиты не создаётся. Install/repair/update/backup/restore/uninstall
+заблокированы в этой топологии до двухсерверного стендового acceptance.
 
-GitHub Actions использует Linux mock-tests, POSIX permissions, официальный Xray и
-одноразовый `nginx:1.30` без сети. CI добавлен, но в этой сессии не запускался.
-Текущая ветка: **45 passed на Debian 13**, **44 passed, 1 skipped на Windows**.
-Реальные Xray/Nginx configuration checks и клиентские тесты выполнены на VPS;
-отдельный Windows-тест Nginx заменяет Unix listener на TCP.
+## Проверки
 
-## Лицензия
+### Troubleshooting
 
-MIT, в соответствии с исходным проектом. Официальные компоненты сохраняют свои лицензии.
+| Симптом | Действие |
+|---|---|
+| Unsupported version / required capability | Сверить фактические версии/бинарник/HTTP2/TLS mounts; не обходить guards |
+| Certificate lifecycle preflight | Подготовить directory mounts и испытать renewal на стенде; отдельное согласование recreate |
+| Duplicate Hosts / identity changed | Сверить UUID и bindings со state/backup; не удалять чужой Host автоматически |
+| Uncertain Host POST / rollback incomplete at host | POST мог завершиться без ответа UUID; сохранить journal и сверить с Panel audit trail; повтор не присваивает похожие Hosts |
+| Rollback incomplete at nginx | Проверить файл, место, `nginx -t`, статус контейнера; после согласованного старта повторить restore |
+| Rollback finalizing | Освободить место/восстановить права и повторить restore: state/history завершаются до terminal marker |
+| HTTP401 / Panel unavailable | Восстановить доступ/token/gateway; не публиковать token; повторить recovery после сверки |
+| Foreign/shared profile / manual clients | Остановиться; привести топологию к поддерживаемой в отдельном плане |
+| Host есть, подписки/трафика нет | Проверить Squad/Node memberships, disabled, формат клиента, DNS/SNI, firewall TCP/UDP |
+| ENOSPC / unfinished transaction | Сохранить private state/journal/backups, восстановить диск/API; сначала restore, затем новый plan |
+| Legacy migration journal | Автоматический rollback/uninstall заблокирован; требуется отдельный audited recovery |
+
+Для обновления исходников заранее сохраните state/history и Git SHA; получите
+проверенный commit в чистый checkout, изучите diff/lockfile и обновите venv по
+hashes. Bootstrap не делает reset существующего checkout. До `--update` выполните
+`--check` и `--backup`; один `--update` не скачивает новую версию проекта.
+Удаление выполняйте `--uninstall` по своей истории, сохранив backup до и после.
+Произвольное восстановление PostgreSQL snapshot выполняется отдельно по upstream
+runbook с согласованной точкой восстановления всех связанных компонентов.
+
+```bash
+python3 -B -m unittest discover -s tests -v
+python3 -B tests/validate_sources.py
+for script in *.sh tests/*.sh; do bash -n "$script"; done
+shellcheck *.sh tests/*.sh
+XRAY_BINARY=/path/to/xray NGINX_BINARY=/path/to/nginx python3 tests/validate_binaries.py
+```
+
+GitHub Actions содержит Ubuntu и Debian13 unit checks, Bash/ShellCheck, pinned
+Xray checksum и Nginx OCI digest из `validation-manifest.json`; контейнер Nginx
+запускается с `--network none` только для `nginx -t`. CI этой ветки не запускался.
+Точные выполненные локальные проверки и пропуски приведены в CODEX_02.
+
+Runtime verification сопоставляет API config, cold config штатного Node CLI,
+перезапуск Xray при изменении базовой конфигурации и владельца TCP/UDP listeners.
+Это не клиентский acceptance. После отдельного согласования rollout проверьте
+защищённую Panel, реальную пользовательскую подписку и каждый разрешённый Host
+снаружи; форматы sing-box/Clash не поддерживают все варианты Xray.
 
 
-## Формат inbound tag и миграция
-
-Новые установки используют `Протокол-Транспорт-сеть`. Имена выводятся из фактических настроек; коллизии во всех профилях получают суффиксы `-2`, `-3`. Shadowsocks с TCP и UDP получает `Shadowsocks-TCP+UDP-tcp+udp`. REALITY поверх XHTTP остаётся XHTTP; Trojan gRPC не называется VLESS. Базовый inbound не переименовывается.
-
-`egames-fork check` показывает миграцию без изменений; `egames-fork install` применяет её через API Panel, сохраняет и восстанавливает связи Hosts, Nodes и Internal Squads по новым UUID. Host remarks, отключения и ограничения сквадов сохраняются. Секреты и сетевые параметры не меняются. Подробности и откат: [INBOUND_TAG_MIGRATION.md](docs/INBOUND_TAG_MIGRATION.md). Результаты реальной проверки: [TAG_MIGRATION_REPORT.md](TAG_MIGRATION_REPORT.md).
+Полные эксплуатационные отчёты не входят в публичный пакет.
+Ранее README заявлял MIT, но отдельного LICENSE проекта нет;
+владелец должен подтвердить лицензию до релиза. См.
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md).
