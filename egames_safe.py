@@ -26,13 +26,66 @@ from pathlib import Path
 import requests
 
 from remnawave_injector import RemnawaveClient, build_inbound, unwrap_list
-from inbound_tags import allocate, descriptive_tag
+from inbound_tags import allocate, descriptive_tag, effective_flow
 
 OWNER = "EGAMES_ADDON"
 BEGIN = "# BEGIN EGAMES_ADDON"
 END = "# END EGAMES_ADDON"
 REVIEWED_PANEL = {"3.4.7"}
 REVIEWED_NODE = {"3.4.3"}
+JOURNAL_SCHEMA = 2
+
+
+def secret_text(path):
+    """Open privileged inputs without following links; reject permissive files."""
+    path = Path(path)
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise RuntimeError("Secret input must not contain symlinks")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, 'O_NONBLOCK', 0))
+    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and
+                (info.st_uid != os.geteuid() or info.st_mode & 0o077)):
+            raise RuntimeError("Secret input must be an owner-only regular file (chmod 600)")
+        return stream.read()
+
+
+def container_identity(container):
+    """Container recreate keeps these attributes; an unrelated install does not."""
+    labels = container.get("Config", {}).get("Labels") or {}
+    return {"name": container.get("Name"), "image": container.get("Image"),
+            "compose": {k: labels.get(k) for k in ("com.docker.compose.project",
+                       "com.docker.compose.service", "com.docker.compose.project.working_dir")},
+            "network": container.get("HostConfig", {}).get("NetworkMode"),
+            "mounts": sorted([m.get("Source"), m.get("Destination"), m.get("RW")]
+                             for m in container.get("Mounts", []))}
+
+
+def installation_identity(rt):
+    return {"nginx_path": str(rt.nginx_path), "node": container_identity(rt.node),
+            "nginx": container_identity(rt.nginx), "api": getattr(rt, "api", None)}
+
+
+def file_identity(path):
+    info = Path(path).stat()
+    return [info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode)]
+
+
+def interrupted_write(before, after, actual):
+    """Recognize ONLY prefixes produced by sequential overwrite then truncate."""
+    before, after, actual = (v.encode("utf-8", errors="surrogateescape") for v in (before, after, actual))
+    if actual in (before, after):
+        return True
+    if len(actual) > len(before):
+        return len(actual) <= len(after) and after.startswith(actual)
+    if len(actual) != len(before):
+        return False
+    prefix = 0
+    for a, b in zip(actual, after):
+        if a != b:
+            break
+        prefix += 1
+    return actual[prefix:] == before[prefix:]
 COUNTRY_CODES = frozenset("""
 AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
 CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR
@@ -117,9 +170,9 @@ def fingerprint(value):
 def private_json(path, value):
     """Atomic owner-only journal/state; never briefly create a world-readable secret."""
     path = Path(path)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.parent.is_symlink() or path.is_symlink():
+    if any(p.is_symlink() for p in (path, *path.parents)):
         raise RuntimeError("Refusing symlink state path")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if os.name == "posix" and (path.parent.stat().st_uid != os.geteuid() or path.parent.stat().st_mode & 0o077):
         raise RuntimeError("State/backup directory must belong to current user with mode 700")
     fd, tmp = tempfile.mkstemp(prefix=".egames-", dir=path.parent)
@@ -142,27 +195,38 @@ def private_json(path, value):
 
 
 @contextmanager
-def lock(directory):
+def lock(directory, rt=None):
     import fcntl
     directory = Path(directory)
+    if any(p.is_symlink() for p in (directory, *directory.parents)):
+        raise RuntimeError('State directory must not contain symlinks')
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if directory.is_symlink() or directory.stat().st_uid != os.geteuid() or directory.stat().st_mode & 0o077:
         raise RuntimeError("State directory must be private (owner/mode 700), without symlinks")
-    fd = os.open(directory / "lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    descriptors = []
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        paths = [directory / 'lock']
+        if rt is not None:
+            paths.insert(0, Path('/run/lock') / ('egames-' + fingerprint(installation_identity(rt))[:24] + '.lock'))
+        for path in paths:
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            descriptors.append(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
     finally:
-        os.close(fd)
+        for fd in reversed(descriptors):
+            os.close(fd)
 
 
 def read_state(directory):
     p = Path(directory) / "state.json"
+    if p.is_symlink():
+        raise RuntimeError('State must not be a symlink')
     if not p.exists():
         return {"owner": OWNER, "tags": [], "hosts": [], "paths": {}}
     if p.is_symlink() or (os.name == "posix" and (p.stat().st_mode & 0o077 or p.stat().st_uid != os.geteuid())):
         raise RuntimeError("State must be a regular owner-only file (chmod 600)")
-    data = json.loads(p.read_text(encoding="utf-8"))
+    data = json.loads(secret_text(p))
     if data.get("owner") != OWNER:
         raise RuntimeError("Invalid state owner")
     return data
@@ -349,7 +413,9 @@ def pq_pair(output):
 
 class Runtime:
     def __init__(self, cfg):
-        ids = command(["docker", "ps", "-q"]).stdout.split()
+        self.cfg = cfg
+        self.recovery = cfg.get("mode") in ("restore", "uninstall")
+        ids = command(["docker", "ps", "-aq" if self.recovery else "-q"]).stdout.split()
         if not ids:
             raise RuntimeError("No running Docker containers")
         containers = json.loads(command(["docker", "inspect", *ids]).stdout)
@@ -357,7 +423,13 @@ class Runtime:
             return c.get("Config", {}).get("Image", "").lower()
         self.node = select_one([c for c in containers if "remnawave/node" in image(c)], "local Node", cfg.get("node_container", ""))
         self.nginx = select_one([c for c in containers if image(c).split(":")[0].endswith("nginx")], "Nginx", cfg.get("nginx_container", ""))
-        self.panel = select_one([c for c in containers if "remnawave/backend" in image(c)], "Panel")
+        self.panel = None
+        if cfg.get("topology", "single-host") == "single-host":
+            self.panel = select_one([c for c in containers if "remnawave/backend" in image(c)], "Panel")
+        elif cfg.get("topology") != "node-only":
+            raise RuntimeError("Unknown topology; expected single-host or node-only")
+        elif not cfg.get("panel_api_url", "").startswith("https://") or not cfg.get("node_uuid") or not cfg.get('token_file'):
+            raise RuntimeError("Node-only requires explicit HTTPS Panel API, token_file and Node UUID")
         for c in (self.node, self.nginx):
             if c.get("HostConfig", {}).get("NetworkMode") != "host":
                 raise RuntimeError("Only local Node + Nginx with host networking is supported")
@@ -366,10 +438,12 @@ class Runtime:
         self.nginx_path = Path(mount_source(self.nginx, self.nginx_inside))
         if self.nginx_path.is_symlink() or not self.nginx_path.is_file():
             raise RuntimeError("Nginx source must be a mounted regular file")
-        self.nginx_text = self.nginx_path.read_text(encoding="utf-8")
+        self.nginx_text = self.nginx_path.read_text(encoding="utf-8", errors="surrogateescape" if self.recovery else "strict")
         self.api = cfg.get("panel_api_url")
         if not self.api:
             bindings = self.panel.get("NetworkSettings", {}).get("Ports", {}).get("3000/tcp") or []
+            if self.recovery and not bindings:
+                bindings = self.panel.get('HostConfig', {}).get('PortBindings', {}).get('3000/tcp') or []
             bindings = [b for b in bindings if b["HostIp"] in ("127.0.0.1", "0.0.0.0", "")]
             if len(bindings) != 1:
                 raise RuntimeError("Cannot uniquely discover the local Panel API")
@@ -378,15 +452,18 @@ class Runtime:
         if not self.token:
             candidates = [Path(cfg.get("token_file", "/usr/local/remnawave_reverse/token"))]
             for p in candidates:
-                if p.is_file() and not p.is_symlink():
-                    self.token = p.read_text().strip()
+                if p.exists() or p.is_symlink():
+                    self.token = secret_text(p).strip()
                     break
         if not self.token or "REPLACE" in self.token:
             import getpass
             if not sys_stdin_tty():
                 raise RuntimeError("No supported admin API token; set PANEL_API_TOKEN or token_file")
             self.token = getpass.getpass("Remnawave API token: ")
+        self.cookie = secret_text(cfg["cookie_file"]).strip() if cfg.get("cookie_file") else ""
         self.xray = None
+        if self.recovery:
+            return  # Recovery must work with stopped Nginx/Node and a broken config.
         for binary in ("/usr/local/bin/rw-core", "/usr/local/bin/xray"):
             r = command(["docker", "exec", self.node["Id"], binary, "version"], check=False)
             if r.returncode == 0 and "Xray" in r.stdout:
@@ -405,6 +482,40 @@ class Runtime:
         # Remnawave injects user flow from settings.flow; retain it for its validator.
         self.core(["run", "-test", "-config", "stdin:"], json.dumps(config))
 
+    def applied_inbounds(self):
+        # Official Node 3.4.3 read-only CLI. Credentials stay in captured memory.
+        try:
+            value = json.loads(command(["docker", "exec", self.node["Id"],
+                                        "cli", "--dump-config-raw"]).stdout)
+            return value["inbounds"]
+        except (ValueError, KeyError, TypeError):
+            raise RuntimeError("Cannot read Node generated config with the reviewed CLI") from None
+
+    def core_pids(self):
+        top = command(["docker", "top", self.node["Id"], "-eo", "pid,comm"]).stdout
+        pids = {int(row[0]) for line in top.splitlines()[1:] if len(row := line.split()) == 2
+                and row[0].isdigit() and row[1] in ("xray", "rw-core")}
+        if not pids:
+            raise RuntimeError("No Xray process belongs to the selected Node container")
+        return pids
+
+    def owned_listeners(self):
+        pids = self.core_pids()
+        listeners = set()
+        for proto, flags in (("tcp", "-Hlnpt"), ("udp", "-Hlnpu")):
+            for line in command(["ss", flags]).stdout.splitlines():
+                fields = line.split()
+                port = re.search(r":(\d+)$", fields[3]) if len(fields) >= 5 else None
+                owners = {int(p) for p in re.findall(r"pid=(\d+)", line)}
+                if port and owners and owners.issubset(pids):
+                    listeners.add((proto, int(port[1])))
+        return listeners
+
+    def verify_mounted_file(self, inside, path):
+        digest = command(['docker', 'exec', self.node['Id'], 'sha256sum', inside]).stdout.split()
+        if not digest or digest[0] != hashlib.sha256(Path(path).read_bytes()).hexdigest():
+            raise RuntimeError('Node TLS mount differs from the current host file; review certificate lifecycle')
+
     def certificate(self, domain):
         _, _, b = node_server(self.nginx_text, domain)
         cert = re.search(r'\bssl_certificate\s+"?([^";\s]+)"?;', b)
@@ -413,12 +524,23 @@ class Runtime:
             raise RuntimeError("Cannot discover selfsteal certificate/key")
         for p in (cert[1], key[1]):
             command(["docker", "exec", self.nginx["Id"], "test", "-r", p])
+        pinned_files = [m for m in self.nginx.get('Mounts', []) if m.get('Destination') in (cert[1], key[1])]
+        self.certificate_lifecycle_safe = not pinned_files
+        if pinned_files:
+            message = 'ACME certificate/key file bind mounts pin old inodes; directory/live+archive mounts and renewal acceptance are required'
+            if self.cfg.get('mode', 'dry-run') not in ('dry-run', 'check', 'status', 'backup'):
+                raise RuntimeError(message)
+            print('TLS LIFECYCLE BLOCKER: ' + message)
         from cryptography import x509
         from cryptography.hazmat.primitives import serialization
         from datetime import datetime, timezone
         cert_path = Path(mount_source(self.nginx, cert[1]))
         key_path = Path(mount_source(self.nginx, key[1]))
         c = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        inside_cert = command(["docker", "exec", self.nginx["Id"], "cat", cert[1]]).stdout
+        from cryptography.hazmat.primitives import hashes
+        if x509.load_pem_x509_certificate(inside_cert.encode()).fingerprint(hashes.SHA256()) != c.fingerprint(hashes.SHA256()):
+            raise RuntimeError("Nginx certificate differs from host; review ACME mounts/recreate hook")
         k = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
         def pub(obj):
             return obj.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -435,7 +557,7 @@ class Runtime:
     def validate_nginx(self, candidate):
         # Replace the conf.d wildcard in the real main config, preserving other includes.
         main = command(["docker", "exec", self.nginx["Id"], "cat", "/etc/nginx/nginx.conf"]).stdout
-        files = command(["docker", "exec", self.nginx["Id"], "find", "/etc/nginx/conf.d", "-maxdepth", "1", "-name", "*.conf", "-type", "f"]).stdout.splitlines()
+        files = sorted(command(["docker", "exec", self.nginx["Id"], "find", "-L", "/etc/nginx/conf.d", "-maxdepth", "1", "-name", "*.conf"]).stdout.splitlines())
         if self.nginx_inside not in files:
             raise RuntimeError("Cannot identify effective Nginx configuration")
         includes = []
@@ -464,14 +586,26 @@ class Runtime:
 
     def write_nginx(self, text):
         # A file bind mount pins its inode: os.replace would leave the container on OLD content.
-        fd = os.open(self.nginx_path, os.O_WRONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            f.write(text)
-            f.truncate()
-            f.flush()
-            os.fsync(f.fileno())
+        fd = os.open(self.nginx_path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            data = text.encode("utf-8")
+            if shutil.disk_usage(self.nginx_path.parent).free < len(data) + 1024 * 1024:
+                raise RuntimeError("Not enough free space for Nginx overwrite")
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view[:65536])
+                if written <= 0:
+                    raise RuntimeError("Incomplete Nginx write")
+                view = view[written:]
+            os.ftruncate(fd, len(data))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def reload(self):
+        if self.recovery and not self.nginx.get("State", {}).get("Running", False):
+            print("Nginx file restored; container is stopped. Validate and start it explicitly.")
+            return
         command(["docker", "exec", self.nginx["Id"], "nginx", "-t"])
         command(["docker", "exec", self.nginx["Id"], "nginx", "-s", "reload"])
 
@@ -568,6 +702,10 @@ def plan(client, rt, cfg, state, occupied):
         raise RuntimeError(f"Panel {version or 'unknown'} has no reviewed adapter; supported: {sorted(REVIEWED_PANEL)}")
     nodes = unwrap_list(client.get("/nodes"), "nodes")
     node = select_one([n for n in nodes if not n.get("isDisabled")], "Panel node", cfg.get("node_uuid", ""))
+    if state.get('node_uuid', node['uuid']) != node['uuid']:
+        raise RuntimeError('Saved state belongs to another Node')
+    if state.get('identity', installation_identity(rt)) != installation_identity(rt):
+        raise RuntimeError('Saved state belongs to another installation')
     if not node.get("isConnected") or not (node.get("versions") or {}).get("node"):
         raise RuntimeError("Node is disconnected or does not report its version")
     if node["versions"]["node"].lstrip("v") not in REVIEWED_NODE:
@@ -587,7 +725,7 @@ def plan(client, rt, cfg, state, occupied):
         addresses = {a[4][0] for a in socket.getaddrinfo(addr, None)}
     except OSError:
         raise RuntimeError("Cannot resolve selected Node management address") from None
-    if not addresses.intersection(local):
+    if not addresses or not addresses.issubset(local):
         raise RuntimeError("Selected Panel node does not refer to this VPS")
     plugin = reviewed_plugin(client, node, rt)
     pid = node["configProfile"]["activeConfigProfileUuid"]
@@ -601,9 +739,12 @@ def plan(client, rt, cfg, state, occupied):
            if i.get("protocol") in ("vless", "trojan", "shadowsocks", "hysteria")):
         raise RuntimeError("Profile contains manual clients that Panel PATCH would clear; refusing changes")
     old443 = [i for i in current.get("inbounds", []) if i.get("port") == 443 and i.get("protocol") == "vless"
-              and i.get("streamSettings", {}).get("security") == "reality"]
+              and i.get("streamSettings", {}).get("security") == "reality"
+              and i.get("streamSettings", {}).get("network") in ("raw", "tcp")]
     if len(old443) != 1:
         raise RuntimeError("Expected one existing VLESS REALITY TCP 443 listener")
+    if effective_flow(old443[0]) != "xtls-rprx-vision":
+        raise RuntimeError("Existing TCP 443 does not provide Panel Vision flow; refusing to advertise Vision")
     reality = old443[0]["streamSettings"]["realitySettings"]
     if reality.get("dest", reality.get("target")) != "/dev/shm/nginx.sock" or reality.get("xver") != 1:
         raise RuntimeError("Unsupported REALITY selfsteal target/PROXY protocol")
@@ -615,6 +756,7 @@ def plan(client, rt, cfg, state, occupied):
     if managed and managed != state.get("nginx_managed"):
         raise RuntimeError("Unowned/externally modified Nginx routes; refusing to overwrite")
     hosts = unwrap_list(client.get("/hosts"), "hosts")
+    validate_host_ownership(profile, hosts, state)
     squads = unwrap_list(client.get("/internal-squads"), "internalSquads")
     old443id = next((i["uuid"] for i in profile["inbounds"] if i["tag"] == old443[0]["tag"]), None)
     if not old443id or old443id not in active_ids(node):
@@ -637,16 +779,33 @@ def plan(client, rt, cfg, state, occupied):
                    ("GRPC", "trojan", "grpc", "none", True), ("XREALITY", "vless", "xhttp", "reality", False),
                    ("PQ", "vless", "raw", "reality", False), ("SS2022", "shadowsocks", "raw", "none", False),
                    ("HY2", "hysteria", "hysteria", "tls", False)]
+    required = cfg.get("required_protocols", ["WS", "XHTTP", "GRPC", "XREALITY", "SS2022"])
+    labels = {d[0] for d in definitions}
+    if not isinstance(required, list) or any(not isinstance(v, str) or v not in labels for v in required):
+        raise RuntimeError("required_protocols must be an array of supported capability labels")
+    unavailable = {}
     for label, proto, net, security, frontend in definitions:
-        if f'EGADDON-{label}' in tags:
+        if f'EGADDON-{label}' in tags and f'EGADDON-{label}' not in state.get('tags', []):
             raise RuntimeError('Unowned inbound or legacy state: migrate before installation')
         tag = state.get('tag_labels', {}).get(label)
         if not tag:
-            tag = allocate(descriptive_tag({'protocol': proto, 'settings': {'version': 2},
-                           'streamSettings': {'network': net, 'security': security}}), global_tags | set(tags) | {s['tag'] for s in specs})
+            owned = [t for t in state.get('tags', []) if t == f'EGADDON-{label}' or
+                     (t.startswith('EGADDON-') and t.endswith('-' + label))]
+            if len(owned) > 1:
+                raise RuntimeError("Ambiguous owned legacy capability; explicit tag_labels required")
+            tag = owned[0] if owned else None
+        if not tag:
+            tag = allocate(descriptive_tag({'protocol': proto, 'settings': {'version': 2, 'flow': ''},
+                           'streamSettings': {'network': net, 'security': security}}, spaced=True), global_tags | set(tags) | {s['tag'] for s in specs})
         old = tags.get(tag)
         if tag in global_tags or (old and tag not in state.get("tags", [])):
             raise RuntimeError(f"Unowned inbound tag conflict: {tag}")
+        if net == "grpc" and not re.search(r"\bhttp2\s+on\s*;", node_server(rt.nginx_text, domain)[2]):
+            if old:
+                raise RuntimeError('Existing gRPC requires HTTP/2; refusing to discard owned routes')
+            unavailable[label] = 'selfsteal server requires explicit http2 on'
+            diagnostics.append("GRPC skipped: " + unavailable[label])
+            continue
         if label == "HY2":
             # Native support exists, but certificate visibility must be proven inside the Node.
             try:
@@ -656,14 +815,17 @@ def plan(client, rt, cfg, state, occupied):
                     if not inside:
                         raise RuntimeError("TLS certificate/key not mounted into Node")
                     command(["docker", "exec", rt.node["Id"], "test", "-r", inside])
+                    rt.verify_mounted_file(inside, path)
             except RuntimeError as e:
                 if old:
                     raise
+                unavailable[label] = str(e)
                 diagnostics.append(f"Hysteria2 skipped: {e}; native protocol=hysteria/version=2 needs readable Node TLS files")
                 continue
         path = state.get("paths", {}).get(tag) or (f"/egadd{secrets.token_hex(12)}/" if net == "grpc" else f"/egadd/{secrets.token_hex(12)}/")
         port = old.get("port") if old else (443 if label == "HY2" else choose_port(occupied, used))
         if label == "HY2" and ("udp", 443) in occupied and not old:
+            unavailable[label] = 'UDP 443 is already occupied'
             diagnostics.append("Hysteria2 skipped: UDP 443 already occupied (QUIC/HTTP3 or another service)")
             continue
         spec = {"tag": tag, "label": label, "protocol": proto, "network": net, "security": security, "port": port,
@@ -678,6 +840,7 @@ def plan(client, rt, cfg, state, occupied):
                     spec["decryption"], _ = pq_pair(rt.core(["vlessenc"]).stdout)
                     spec["flow"] = ""  # no Vision + PQ transport assumptions
                 except RuntimeError:
+                    unavailable[label] = 'installed core has no validated ML-KEM-768 generator'
                     diagnostics.append("PQ skipped: installed core has no validated ML-KEM-768 generator")
                     continue
             tls_cert = tls_key = ""
@@ -694,6 +857,7 @@ def plan(client, rt, cfg, state, occupied):
                 probe["inbounds"].append(ib)
                 rt.validate_xray(probe)
             except RuntimeError:
+                unavailable[label] = 'installed Xray rejects the proposed configuration'
                 diagnostics.append(f"{tag} skipped: installed Xray rejects the proposed configuration")
                 continue
             desired["inbounds"].append(ib)
@@ -701,15 +865,41 @@ def plan(client, rt, cfg, state, occupied):
         if frontend:
             routes.append({"path": path, "port": port, "network": net})
     check_ports(current, desired, occupied)
+    if set(state.get('tags', [])) - {spec['tag'] for spec in specs}:
+        raise RuntimeError('Existing owned capabilities cannot be resolved; refusing to lose ownership')
+    capabilities = {label: {"required": label in required,
+                           "status": "ready" if any(s['label'] == label for s in specs) else "unavailable",
+                           "reason": unavailable.get(label)}
+                    for label in sorted(labels)}
+    missing = [label for label in required if capabilities[label]["status"] != "ready"]
+    if missing:
+        raise RuntimeError("Required capabilities unavailable: " + ", ".join(missing) + "; " + "; ".join(diagnostics))
     rt.validate_xray(desired)
     nginx = add_routes(rt.nginx_text, domain, routes)
     rt.validate_nginx(nginx)
+    firewall = check_firewall(specs)
     if old443[0] != next(i for i in desired["inbounds"] if i["tag"] == old443[0]["tag"]):
         raise RuntimeError("Original 443 listener was modified")
     return {"profile": profile, "node": node, "squads": target_squads, "hosts": hosts,
             "config": desired, "specs": specs, "nginx": nginx, "domain": domain,
             "diagnostics": diagnostics, "panel_version": version, "plugin": plugin,
-            "country_code": code, "base_hosts": base_hosts}
+            "country_code": code, "base_hosts": base_hosts, "capabilities": capabilities, "firewall": firewall,
+            "core_pids": sorted(rt.core_pids())}
+
+
+def validate_host_ownership(profile, hosts, state):
+    ids = {i['tag']: i['uuid'] for i in profile['inbounds']}
+    for tag in state.get('tags', []):
+        binding = {'configProfileUuid': profile['uuid'], 'configProfileInboundUuid': ids.get(tag)}
+        matches = [h for h in hosts if h.get('inbound') == binding]
+        if len(matches) > 1:
+            raise RuntimeError('Duplicate Hosts for managed endpoint; refusing automatic ownership')
+        saved = state.get('host_ids', {}).get(tag)
+        if saved and (not matches or matches[0]['uuid'] != saved):
+            raise RuntimeError('Managed Host identity changed; review required')
+        if matches and (matches[0]['uuid'] not in state.get('hosts', []) or
+                        OWNER not in matches[0].get('tags', [])):
+            raise RuntimeError('Unowned Host uses a managed inbound; review required')
 
 
 def project(value, shape):
@@ -749,13 +939,18 @@ def current_object(client, op):
                  "host": ("/hosts", "hosts")}[op["kind"]]
     values = unwrap_list(client.get(path), key)
     if op["kind"] == "host" and op["method"] == "POST":
-        values = [h for h in values if OWNER in h.get("tags", []) and
-                  h.get("inbound") == op["after"]["inbound"]]
-        if not values:
+        matches = [h for h in values if h.get("inbound") == op["after"]["inbound"]]
+        created_id = op.get("created_uuid")
+        if not created_id:
+            if matches:
+                raise RuntimeError("Uncertain Host POST identity; preserve journal for manual reconciliation")
             return None
-        if len(values) != 1:
+        found = next((h for h in values if h.get("uuid") == created_id), None)
+        if found is None and matches:
+            raise RuntimeError("Created Host replaced externally; refusing replacement ownership")
+        if found is not None and (len(matches) != 1 or matches[0]["uuid"] != created_id):
             raise RuntimeError("Ambiguous created Host during recovery")
-        return values[0]
+        return found
     val = next((v for v in values if v["uuid"] == op["after"]["uuid"]), None)
     if val is None:
         raise RuntimeError("API object disappeared during transaction")
@@ -778,7 +973,26 @@ def firewall_status():
 
 
 def ufw_has_rule(text, rule):
-    return bool(re.search(r"(?m)^" + re.escape(rule) + r"(?:\s|$).*\bALLOW\b", text))
+    return bool(re.search(r"(?m)^" + re.escape(rule) + r"\s+ALLOW(?: IN)?\s+Anywhere(?:\s|$)", text))
+
+
+def check_firewall(specs):
+    status = firewall_status()
+    if status is None:
+        return {"ufw": "inactive-or-unavailable", "external": "not-tested"}
+    for spec in specs:
+        if spec['frontend']:
+            continue
+        for proto in transports(spec):
+            rule = f"{spec['port']}/{proto}"
+            lines = [line.split('#', 1)[0].strip() for line in status.splitlines()
+                     if re.match(re.escape(rule) + r"(?:\s|$)", line)]
+            if lines and not all(re.fullmatch(re.escape(rule) +
+                    r"(?: \(v6\))?\s+ALLOW(?: IN)?\s+Anywhere(?: \(v6\))?", line) for line in lines):
+                raise RuntimeError("Restricted/conflicting UFW rule; refusing implicit public access expansion")
+            if lines and not any('(v6)' in line for line in lines):
+                raise RuntimeError("IPv4-only UFW allowance; review IPv6 policy explicitly")
+    return {"ufw": "reviewed", "external": "not-tested"}
 
 
 class Transaction:
@@ -787,6 +1001,8 @@ class Transaction:
         self.directory = Path(directory)
         self.path = self.directory / "journal.json"
         self.data = {"owner": OWNER, "status": "pending", "operations": [], "old_state": state,
+                     "schema": JOURNAL_SCHEMA, "epoch": state.get("epoch", 0),
+                     "identity": installation_identity(rt),
                      "nginx_path": str(rt.nginx_path), "node_container": rt.node["Id"],
                      "nginx_container": rt.nginx["Id"]}
 
@@ -794,29 +1010,51 @@ class Transaction:
         private_json(self.path, self.data)
 
     def api(self, kind, path, before, after, method="PATCH"):
+        op = {"kind": kind, "path": path, "method": method, "before": before, "after": after}
+        actual = current_object(self.client, op)
+        if not same_operation_value(op, actual, before):
+            raise RuntimeError("Concurrent API change since planning; refusing overwrite")
         if before == after:
             return
-        op = {"kind": kind, "path": path, "method": method, "before": before, "after": after}
+        if kind == 'profile':
+            nodes = unwrap_list(self.client.get('/nodes'), 'nodes')
+            if sum(n.get('configProfile', {}).get('activeConfigProfileUuid') == after['uuid'] for n in nodes) != 1:
+                raise RuntimeError('Concurrent shared profile binding blocks mutation')
         self.data["operations"].append(op)
         self.save()  # write intent before any side effect, including an uncertain HTTP result
-        self.client.request(method, path, after)
+        response = self.client.request(method, path, after)
+        if kind == "host" and method == "POST":
+            if not isinstance(response, dict) or not response.get("uuid"):
+                raise RuntimeError("Host POST response missing immutable UUID")
+            op["created_uuid"] = response["uuid"]
+            self.save()
         actual = current_object(self.client, op)
         if not same_operation_value(op, actual, after):
             raise RuntimeError("API read-back differs from submitted change")
         op["done"] = True
+        if kind == "host" and method == "POST":
+            op["created_snapshot"] = copy.deepcopy(actual)
         self.save()
 
     def nginx(self, before, after):
+        if self.rt.nginx_path.read_text(encoding="utf-8") != before:
+            raise RuntimeError("Concurrent Nginx change since planning")
         if before == after:
             return
-        self.data["operations"].append({"kind": "nginx", "before": before, "after": after})
+        self.data["operations"].append({"kind": "nginx", "before": before, "after": after,
+                                        "write_state": "writing", "file_identity": file_identity(self.rt.nginx_path)})
         self.save()
         self.rt.write_nginx(after)
+        if self.rt.nginx_path.read_text(encoding="utf-8") != after:
+            raise RuntimeError("Nginx write read-back mismatch")
+        self.data["operations"][-1]["write_state"] = "written"
+        self.save()
         self.rt.reload()
         self.data["operations"][-1]["done"] = True
         self.save()
 
     def firewall(self, specs):
+        check_firewall(specs)
         status = firewall_status()
         if status is None:
             return
@@ -832,6 +1070,7 @@ class Transaction:
                 command(["ufw", "allow", rule, "comment", OWNER])
                 if not ufw_has_rule(firewall_status() or "", rule):
                     raise RuntimeError("UFW rule creation not confirmed")
+                check_firewall([spec])
                 self.data["operations"][-1]["done"] = True
                 self.save()
                 status = firewall_status() or ""
@@ -839,6 +1078,8 @@ class Transaction:
         errors = []
         for op in reversed(self.data["operations"]):
             try:
+                if op.get("rolled_back"):
+                    continue
                 if op["kind"] == "ufw":
                     status = firewall_status()
                     if status is None:
@@ -849,23 +1090,34 @@ class Transaction:
                     if not all(OWNER in line for line in lines):
                         raise RuntimeError("Firewall ownership changed; refusing rule deletion")
                     command(["ufw", "--force", "delete", "allow", op["rule"], "comment", OWNER])
-                    if ufw_has_rule(firewall_status() or "", op["rule"]):
+                    if any(re.match(re.escape(op['rule']) + r'\s', line)
+                           for line in (firewall_status() or '').splitlines()):
                         raise RuntimeError("UFW rollback not confirmed")
                 elif op["kind"] == "nginx":
-                    actual = self.rt.nginx_path.read_text(encoding="utf-8")
-                    if actual == op["before"]:
-                        continue
-                    if actual != op["after"]:
+                    actual = self.rt.nginx_path.read_text(encoding="utf-8", errors="surrogateescape")
+                    partial = (op.get("write_state") in ("writing", "restoring") and
+                               op.get("file_identity") == file_identity(self.rt.nginx_path) and
+                               interrupted_write(op["before"] if op["write_state"] == "writing" else op.get('restore_from', op["after"]),
+                                                 op["after"] if op["write_state"] == "writing" else op["before"], actual))
+                    if actual not in (op["before"], op["after"]) and not partial:
                         raise RuntimeError("Nginx drift blocks automatic rollback")
-                    self.rt.validate_nginx(op["before"])
+                    if not getattr(self.rt, "recovery", False) or self.rt.nginx.get("State", {}).get("Running"):
+                        self.rt.validate_nginx(op["before"])
+                    op["write_state"] = "restoring"
+                    op['restore_from'] = actual
+                    self.save()
                     self.rt.write_nginx(op["before"])
+                    if self.rt.nginx_path.read_text(encoding="utf-8") != op["before"]:
+                        raise RuntimeError("Nginx recovery read-back mismatch")
                     self.rt.reload()
+                    if getattr(self.rt, "recovery", False) and not self.rt.nginx.get("State", {}).get("Running"):
+                        raise RuntimeError("Nginx runtime validation pending; start and validate service before retry")
                 else:
                     actual = current_object(self.client, op)
                     if op["method"] == "POST":
                         if actual is None:
                             continue
-                        if not same_operation_value(op, actual, op["after"]):
+                        if actual != op.get("created_snapshot"):
                             raise RuntimeError("Created Host changed externally; not removing it")
                         self.client.request("DELETE", f"/hosts/{actual['uuid']}")
                         if current_object(self.client, op) is not None:
@@ -875,6 +1127,17 @@ class Transaction:
                             continue
                         if not same_operation_value(op, actual, op["after"]):
                             raise RuntimeError("API object drift blocks automatic rollback")
+                        if op['kind'] == 'profile':
+                            keep = {i['tag'] for i in op['before']['config']['inbounds']}
+                            full = self.client.get('/config-profiles/' + op['after']['uuid'])
+                            removed = {i['uuid'] for i in full['inbounds'] if i['tag'] not in keep}
+                            nodes = unwrap_list(self.client.get('/nodes'), 'nodes')
+                            squads = unwrap_list(self.client.get('/internal-squads'), 'internalSquads')
+                            hosts = unwrap_list(self.client.get('/hosts'), 'hosts')
+                            if (any(removed.intersection(active_ids(n)) for n in nodes) or
+                                    any(removed.intersection(i['uuid'] for i in q.get('inbounds', [])) for q in squads) or
+                                    any((h.get('inbound') or {}).get('configProfileInboundUuid') in removed for h in hosts)):
+                                raise RuntimeError('New external bindings block profile rollback')
                         self.client.patch(op["path"], op["before"])
                         if not same_operation_value(op, current_object(self.client, op), op["before"]):
                             raise RuntimeError("API rollback read-back failed")
@@ -884,11 +1147,25 @@ class Transaction:
                 errors.append(op["kind"])
                 # Later dependent rollback steps can remove live inbounds. Stop at first failure.
                 break
-        self.data["status"] = "rollback_incomplete" if errors else "rolled_back"
+        self.data["status"] = "rollback_incomplete" if errors else "rollback_finalizing"
         self.save()
         if errors:
             raise RuntimeError(f"Rollback INCOMPLETE at {errors[0]}; preserve journal.json and inspect manually")
         private_json(self.directory / "state.json", self.data["old_state"])
+        # Persist metadata before the terminal marker. Retrying finalizing is safe.
+        history = self.data.get("history_path")
+        if history:
+            history = Path(history)
+            if not history.resolve().is_relative_to((self.directory / "transactions").resolve()):
+                raise RuntimeError("Invalid transaction history path")
+            private_json(history, {**self.data, "status": "rolled_back"})
+        self.data["status"] = "rolled_back"
+        self.save()
+        primary = self.directory / "journal.json"
+        if self.path != primary and primary.exists():
+            latest = json.loads(secret_text(primary))
+            if latest.get("history_path") == self.data.get("history_path"):
+                private_json(primary, self.data)
 
 
 def bind_hosts_and_node(tx, p, state):
@@ -913,10 +1190,11 @@ def bind_hosts_and_node(tx, p, state):
             new_managed_ids.append(iid)
         body = host_body(spec, full["uuid"], iid, p["domain"], p["node"]["uuid"], p["country_code"])
         saved_id = state.get("host_ids", {}).get(spec["tag"])
-        matches = [h for h in p["hosts"] if h.get("uuid") == saved_id] if saved_id else [
-            h for h in p["hosts"] if h.get("inbound") == body["inbound"]]
+        matches = [h for h in p["hosts"] if h.get("inbound") == body["inbound"]]
         if len(matches) > 1:
             raise RuntimeError("Duplicate Hosts for managed endpoint; refusing automatic ownership")
+        if saved_id and (not matches or matches[0]["uuid"] != saved_id):
+            raise RuntimeError("Managed Host identity changed; review required")
         if matches:
             h = matches[0]
             if OWNER not in h.get("tags", []) or h["uuid"] not in state.get("hosts", []):
@@ -925,10 +1203,15 @@ def bind_hosts_and_node(tx, p, state):
             if type(h.get("isDisabled")) is not bool:
                 raise RuntimeError("Managed Host has an invalid disabled status")
             body["isDisabled"] = h["isDisabled"]
+            body['tags'] = list(h.get('tags', []))
+            if 'nodes' in h:
+                body['nodes'] = copy.deepcopy(h['nodes'])
             before = project(h, body)
             tx.api("host", "/hosts", {"uuid": h["uuid"], **before}, {"uuid": h["uuid"], **body})
         else:
             tx.api("host", "/hosts", None, body, "POST")
+        p.setdefault("owned_host_ids", {})[spec["tag"]] = (
+            matches[0]["uuid"] if matches else tx.data["operations"][-1]["created_uuid"])
     for squad in p["squads"]:
         before = writable_squad(squad)
         # Only enroll newly installed inbounds. An operator may deliberately
@@ -937,7 +1220,7 @@ def bind_hosts_and_node(tx, p, state):
         tx.api("squad", "/internal-squads", before, after)
     before = writable_node(p["node"])
     after = copy.deepcopy(before)
-    after["configProfile"]["activeInbounds"] = list(dict.fromkeys(active_ids(p["node"]) + managed_ids))
+    after["configProfile"]["activeInbounds"] = list(dict.fromkeys(active_ids(p["node"]) + new_managed_ids))
     tx.api("node", "/nodes", before, after)
 
 
@@ -946,11 +1229,24 @@ def verify(client, rt, p):
     for _ in range(15):
         nodes = unwrap_list(client.get("/nodes"), "nodes")
         node = next(n for n in nodes if n["uuid"] == p["node"]["uuid"])
-        occupied = occupied_ports()
-        expected = {(proto, spec["port"]) for spec in p["specs"] for proto in
-                    ({"udp"} if spec["protocol"] == "hysteria" else
-                     {"tcp", "udp"} if spec["protocol"] == "shadowsocks" else {"tcp"})}
-        if node.get("isConnected") and expected.issubset(occupied):
+        profile = client.get('/config-profiles/' + p['profile']['uuid'])
+        if profile['config'] != p['config'] or node['configProfile']['activeConfigProfileUuid'] != profile['uuid']:
+            raise RuntimeError("Applied profile/config changed during verification")
+        enabled = {i['tag'] for i in profile['inbounds'] if i['uuid'] in active_ids(node)}
+        expected_inbounds = [i for i in p['config']['inbounds'] if i['tag'] in enabled]
+        expected = {(proto, i['port']) for i in expected_inbounds for proto in transports(i)}
+        occupied = rt.owned_listeners()
+        def normalized(ib):
+            value = copy.deepcopy(ib)
+            value.get('settings', {}).pop('clients', None)
+            value.get('settings', {}).pop('flow', None)  # Panel injects flow per user.
+            return value
+        actual = {i['tag']: i for i in rt.applied_inbounds()}
+        synced = all(i['tag'] in actual and normalized(actual[i['tag']]) == normalized(i) for i in expected_inbounds)
+        disabled = {i['tag'] for i in p['config']['inbounds']} - enabled
+        restart_needed = p['profile']['config'] != p['config'] or set(active_ids(p['node'])) != set(active_ids(node))
+        restarted = not restart_needed or set(p['core_pids']).isdisjoint(rt.core_pids())
+        if node.get("isConnected") and not node.get('isDisabled') and synced and restarted and not disabled.intersection(actual) and expected.issubset(occupied):
             break
         time.sleep(2)
     else:
@@ -970,6 +1266,15 @@ def apply(client, rt, p, directory, state):
     if latest["config"] != p["profile"]["config"] or rt.nginx_path.read_text(encoding="utf-8") != rt.nginx_text:
         raise RuntimeError("Configuration changed since planning")
     verify_plugin(client, rt, p)
+    check_firewall(p['specs'])
+    validate_host_ownership(latest, unwrap_list(client.get('/hosts'), 'hosts'), state)
+    for path, key, saved, normalize in (
+            ("/nodes", "nodes", [p["node"]], writable_node),
+            ("/internal-squads", "internalSquads", p["squads"], writable_squad),
+            ("/hosts", "hosts", p["hosts"], lambda h: h)):
+        current = {x["uuid"]: normalize(x) for x in unwrap_list(client.get(path), key)}
+        if any(current.get(x["uuid"]) != normalize(x) for x in saved):
+            raise RuntimeError("Concurrent binding change since planning")
     check_ports(p["profile"]["config"], p["config"], occupied_ports())
     tx = Transaction(client, rt, directory, state)
     tx.save()
@@ -981,32 +1286,64 @@ def apply(client, rt, p, directory, state):
         tx.api("profile", "/config-profiles", profile_patch(p["profile"], p["profile"]["config"]),
                profile_patch(p["profile"], p["config"]))
         tx.nginx(rt.nginx_text, p["nginx"])
-        tx.firewall(p["specs"])
+        tx.firewall([spec for spec in p['specs'] if spec['tag'] not in state.get('tags', [])])
         bind_hosts_and_node(tx, p, state)
         verify(client, rt, p)
-        hosts = unwrap_list(client.get("/hosts"), "hosts")
         tags = [s["tag"] for s in p["specs"]]
         history_path = Path(directory) / "transactions" / f"{time.time_ns()}.json"
-        inbound_tags = {i["uuid"]: i["tag"] for i in client.get(f"/config-profiles/{p['profile']['uuid']}")["inbounds"]}
         new_state = {"owner": OWNER, "profile_uuid": p["profile"]["uuid"], "node_uuid": p["node"]["uuid"],
+            "schema": JOURNAL_SCHEMA, "epoch": state.get("epoch", 0),
+            "identity": installation_identity(rt),
             "history": state.get("history", []) + [str(history_path)],
             "nginx_managed": managed_nginx(p["nginx"]),
-            "host_ids": {inbound_tags[h["inbound"]["configProfileInboundUuid"]]: h["uuid"] for h in hosts
-                         if OWNER in h.get("tags", []) and h.get("inbound", {}).get("configProfileInboundUuid") in inbound_tags},
-            "tags": tags, "hosts": [h["uuid"] for h in hosts if OWNER in h.get("tags", []) and
-                                    h.get("inbound", {}).get("configProfileUuid") == p["profile"]["uuid"]],
+            "host_ids": dict(p.get("owned_host_ids", {})),
+            "tags": tags, "hosts": list(p.get("owned_host_ids", {}).values()),
             "paths": {s["tag"]: s["path"] for s in p["specs"]},
             "inbounds": {i["tag"]: i for i in p["config"]["inbounds"] if i["tag"] in tags},
             "tag_labels": {s['label']: s['tag'] for s in p['specs']},
             **{k: state[k] for k in ('tag_migration_backup', 'pre_tag_migration_history') if k in state},
             "last_backup": str(backup_path)}
+        # Durable commit intent lets recovery finish metadata after a crash at any write.
+        tx.data["new_state"] = new_state
+        tx.data["history_path"] = str(history_path)
+        tx.data["status"] = "committing"
+        tx.save()
+        private_json(history_path, {**tx.data, "status": "committed"})
         private_json(Path(directory) / "state.json", new_state)
         tx.data["status"] = "committed"
         tx.save()
-        private_json(history_path, tx.data)
     except BaseException:
         tx.rollback()
         raise
+
+
+def change_summary(p, state):
+    new = [spec for spec in p['specs'] if spec['tag'] not in state.get('tags', [])]
+    return {'profileUuid': p['profile']['uuid'],
+            'configBeforeSha256': fingerprint(p['profile']['config']), 'configAfterSha256': fingerprint(p['config']),
+            'newInboundTags': [spec['tag'] for spec in new],
+            'nodeUuid': p['node']['uuid'], 'nodeEnableNewTags': [spec['tag'] for spec in new],
+            'squadUuidsForNewInbounds': [q['uuid'] for q in p['squads']] if new else [],
+            'managedHostTags': [spec['tag'] for spec in p['specs']],
+            'originalHostRemarks': [h['uuid'] for h in p['base_hosts'] if h['remark'] != host_remark('STEAL', p['country_code'])],
+            'nginxManagedSha256': fingerprint(managed_nginx(p['nginx'])),
+            'publicRuleCandidates': sorted(f"{spec['port']}/{proto}" for spec in new if not spec['frontend'] for proto in transports(spec)),
+            'externalFirewall': p['firewall']['external']}
+
+
+def rollback_summary(data):
+    result = []
+    for op in reversed(data['operations']):
+        item = {'kind': op['kind']}
+        if op['kind'] == 'nginx':
+            item.update(path=data['nginx_path'], beforeSha256=fingerprint(op['before']),
+                        afterSha256=fingerprint(op['after']))
+        elif op['kind'] == 'ufw':
+            item['rule'] = op['rule']
+        else:
+            item['uuid'] = op.get('created_uuid') or (op.get('after') or {}).get('uuid')
+        result.append(item)
+    return result
 
 
 def recover(client, rt, directory, path=None):
@@ -1015,11 +1352,30 @@ def recover(client, rt, directory, path=None):
         raise RuntimeError("Recovery path outside installer state")
     if not path.is_file() or path.is_symlink() or (os.name == "posix" and path.stat().st_mode & 0o077):
         raise RuntimeError("Missing/private journal required for restore")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("owner") != OWNER or data.get("nginx_path") != str(rt.nginx_path) or data.get("node_container") != rt.node["Id"]:
+    data = json.loads(secret_text(path))
+    state = read_state(directory)
+    if any(state.get(key) != data.get('old_state', {}).get(key) for key in
+           ('tag_migration_backup', 'pre_tag_migration_history')):
+        raise RuntimeError("Historical tag migration invalidated UUID journals; automatic restore is blocked")
+    if (data.get("schema") != JOURNAL_SCHEMA or data.get("epoch") != state.get("epoch", 0) or
+            data.get("owner") != OWNER or data.get("identity") != installation_identity(rt)):
         raise RuntimeError("Recovery journal does not match this installation")
+    if data.get("status") == "rolled_back":
+        return
+    if data.get("status") == "committing":
+        history = Path(data["history_path"])
+        if not history.resolve().is_relative_to((Path(directory) / "transactions").resolve()):
+            raise RuntimeError("Invalid transaction history path")
+        private_json(history, {**data, "status": "committed"})
+        private_json(Path(directory) / "state.json", data["new_state"])
+        data["status"] = "committed"
     tx = Transaction(client, rt, directory, data["old_state"])
+    tx.path = path
     tx.data = data
+    if getattr(rt, 'recovery', False) and not rt.nginx.get('State', {}).get('Running'):
+        # Repair the durable local file even when remote/API compensation is unavailable.
+        tx.data['operations'] = [op for op in data['operations'] if op['kind'] != 'nginx'] + [
+            op for op in data['operations'] if op['kind'] == 'nginx']
     tx.rollback()
     print("Rollback confirmed by API/file read-back. Original node/profile identity preserved.")
 
@@ -1032,48 +1388,48 @@ def run(cfg):
     if mode not in ("dry-run", "check", "status") and os.geteuid() != 0:
         raise RuntimeError("Mutating modes require root")
     directory = Path(cfg.get("state_dir", "/var/lib/egames-injector"))
+    if cfg.get("topology") == "node-only" and mode not in ("dry-run", "check", "status"):
+        raise RuntimeError("Node-only adapter supports read-only inventory/planning; distributed apply is not qualified")
     rt = Runtime(cfg)
-    client = RemnawaveClient(rt.api, rt.token, timeout=int(cfg.get("timeout", 30)))
+    client = RemnawaveClient(rt.api, rt.token, cookie=rt.cookie, timeout=int(cfg.get("timeout", 30)))
+    if cfg.get('topology') == 'node-only':
+        from node_only import inspect
+        print(json.dumps(inspect(client, rt, cfg), sort_keys=True))
+        return 0
     if mode in ("restore", "uninstall"):
-        with lock(directory):
+        with lock(directory, rt):
+            state = read_state(directory)
+            paths = [str(directory / 'journal.json')] if mode == 'restore' else list(reversed(state.get('history', [])))
+            for path in paths:
+                if not Path(path).resolve().is_relative_to(directory.resolve()):
+                    raise RuntimeError('Recovery path outside installer state')
+                data = json.loads(secret_text(path))
+                if data.get('schema') != JOURNAL_SCHEMA or data.get('owner') != OWNER or data.get('identity') != installation_identity(rt):
+                    raise RuntimeError('Legacy/foreign recovery journal is blocked; preserve it for independent recovery')
+                print('Rollback plan: ' + json.dumps(rollback_summary(data)))
+            if not cfg.get('yes') and (not sys_stdin_tty() or input('Apply this rollback plan? Type APPLY: ') != 'APPLY'):
+                raise RuntimeError('Rollback plan not confirmed; use --yes only after reviewing the plan')
             if mode == "restore":
                 recover(client, rt, directory)
             else:
                 state = read_state(directory)
                 if state.get('tag_migration_backup'):
-                    raise RuntimeError('Restore tag migration first using tag_migration.py --restore before uninstalling historical installation')
+                    raise RuntimeError('Historical tag migration invalidated UUID journals; automatic uninstall is blocked')
                 for path in reversed(state.get("history", [])):
                     recover(client, rt, directory, path)
                 print("Managed additions removed through recorded transactions; original components retained.")
         return 0
     state = read_state(directory)
     if (directory / 'journal.json').exists():
-        if json.loads((directory / 'journal.json').read_text())['status'] not in ('committed', 'rolled_back'):
-            raise RuntimeError('Unfinished installer transaction; run --restore before tag migration')
+        if json.loads(secret_text(directory / 'journal.json'))['status'] not in ('committed', 'rolled_back'):
+            raise RuntimeError('Unfinished installer transaction; run --restore')
     migration_journal = directory / 'tag-migration.json'
-    if migration_journal.exists() and json.loads(migration_journal.read_text())['status'] not in ('committed', 'rolled_back'):
-        raise RuntimeError('Unfinished tag migration; use tag_migration.py --restore')
+    if migration_journal.exists() and json.loads(secret_text(migration_journal))['status'] not in ('committed', 'rolled_back'):
+        raise RuntimeError('Legacy tag migration incomplete; automatic operations blocked; preserve snapshot for audited recovery')
     if any(t.startswith('EGADDON-') for t in state.get('tags', [])):
-        from tag_migration import prepare, migrate
-        proposal = prepare(client, state)
-        rt.validate_xray(proposal['config'])
-        print('Inbound tag migration (Hosts, Node, Squad UUID bindings will be restored):')
-        for old, new in proposal['mapping'].items():
-            print(f'{old} -> {new}')
-        if mode in ('dry-run', 'check', 'status'):
-            print('Migration required; read-only validation passed. Run --install to apply.')
-            return 0
-        if mode != 'backup':
-            with lock(directory):
-                state = migrate(client, rt, directory, read_state(directory))
-        else:
-            with lock(directory):
-                path = directory / 'backups' / f'pre-migration-{time.time_ns()}.json'
-                private_json(path, proposal)
-                print(f'Private backup: {path}')
-            return 0
+        print('Existing technical tags retained: Panel rename would replace inbound UUIDs.')
     if (directory / "journal.json").exists():
-        journal = json.loads((directory / "journal.json").read_text(encoding="utf-8"))
+        journal = json.loads(secret_text(directory / "journal.json"))
         if journal["status"] not in ("committed", "rolled_back"):
             raise RuntimeError("An unfinished transaction exists; run --restore before further changes")
     p = plan(client, rt, cfg, state, occupied_ports())
@@ -1083,6 +1439,10 @@ def run(cfg):
         print(f"Original REALITY Host name: {host_remark('STEAL', p['country_code'])}")
     for d in p["diagnostics"]:
         print(d)
+    print("CAPABILITIES " + json.dumps(p["capabilities"], sort_keys=True))
+    print("CHANGE PLAN " + json.dumps(change_summary(p, state), sort_keys=True))
+    if mode == 'check' and not getattr(rt, 'certificate_lifecycle_safe', True):
+        raise RuntimeError('Certificate lifecycle preflight failed; review file bind mounts before applying')
     print("TAG | public port | local port | transport | Host name")
     for s in p["specs"]:
         print(f"{s['tag']} | {443 if s['frontend'] else s['port']} | {s['port']} | {s['network']} | {host_remark(s['tag'], p['country_code'], s.get('label'))}")
@@ -1090,24 +1450,29 @@ def run(cfg):
         print("Read-only plan complete. Xray and Nginx validators passed; no client connection tested.")
         return 0
     if mode == "backup":
-        with lock(directory):
+        with lock(directory, rt):
             path = directory / "backups" / f"manual-{time.time_ns()}.json"
             private_json(path, {"owner": OWNER, "profile": p["profile"], "hosts": p["hosts"],
                                "node": p["node"], "squads": p["squads"], "nginx": rt.nginx_text,
                                "plugin": p.get("plugin")})
             print(f"Private backup: {path}")
         return 0
-    with lock(directory):
+    with lock(directory, rt):
         # Lock also covers reading state and constructing the final plan.
         if (directory / "journal.json").exists():
-            status = json.loads((directory / "journal.json").read_text(encoding="utf-8"))["status"]
+            status = json.loads(secret_text(directory / "journal.json"))["status"]
             if status not in ("committed", "rolled_back"):
                 raise RuntimeError("An unfinished transaction exists; run --restore")
-        state = read_state(directory)
-        p = plan(client, rt, cfg, state, occupied_ports())
-        print("Final locked plan (public ports may differ from the preview):")
+        # Keep exactly the previewed ports, paths and generated credentials.
+        # apply re-reads every affected object under this lock before writing.
+        if state != read_state(directory):
+            raise RuntimeError("Installer state changed since preview; repeat planning")
+        print("Final locked plan:")
         for spec in p["specs"]:
             print(f"{spec['tag']}: {443 if spec['frontend'] else spec['port']}")
+        if not cfg.get("yes"):
+            if not sys_stdin_tty() or input("Apply this exact plan? Type APPLY: ") != "APPLY":
+                raise RuntimeError("Plan not confirmed; use --yes for an explicitly approved unattended run")
         apply(client, rt, p, directory, state)
     print("Desired state confirmed by read-back; Node connected, local listeners present, Nginx validated.")
     print("Remote client traffic and subscription content still require an end-to-end client check.")

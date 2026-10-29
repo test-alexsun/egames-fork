@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Remnawave eGames Config/Hosts Injector
-Полностью автоматический: всё из config.yaml.
-Создаёт Config Profile (inbounds), Hosts, привязывает к Node и Squad.
+Remnawave eGames Config/Hosts adapter.
+Plans changes to the existing profile; applies only a confirmed plan.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import copy
 import logging
 import os
 import secrets
@@ -316,6 +314,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Safe eGames add-on for existing Remnawave + Node + Nginx")
     parser.add_argument("-c", "--config", default=None)
     parser.add_argument("--state-dir", default="/var/lib/egames-injector")
+    parser.add_argument("--topology", choices=("single-host", "node-only"), default=None)
+    parser.add_argument("--yes", action="store_true", help="Approve the displayed plan for unattended apply")
     modes = parser.add_mutually_exclusive_group()
     for name in ("dry-run", "check", "status", "install", "repair", "update", "backup", "restore", "uninstall"):
         modes.add_argument("--" + name, dest="mode", action="store_const", const=name)
@@ -323,9 +323,9 @@ def main() -> int:
     cfg = {}
     if args.config:
         try:
-            with Path(args.config).open(encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-        except (OSError, yaml.YAMLError):
+            from egames_safe import secret_text
+            cfg = yaml.safe_load(secret_text(args.config)) or {}
+        except (OSError, RuntimeError, yaml.YAMLError):
             parser.error("Cannot read a valid YAML configuration; contents withheld")
         if not isinstance(cfg, dict):
             parser.error("Config must be a YAML mapping")
@@ -333,18 +333,37 @@ def main() -> int:
             parser.error("Legacy target_inbounds config is unsafe; migrate using config.example.yaml")
     cfg["mode"] = args.mode or "dry-run"
     cfg["state_dir"] = args.state_dir
+    cfg["yes"] = args.yes
+    if args.topology:
+        cfg["topology"] = args.topology
     if cfg.get("dry_run"):
         cfg["mode"] = "dry-run"
     for env_key, key in (("PANEL_API_TOKEN", "panel_api_token"), ("PANEL_API_URL", "panel_api_url"),
                          ("HOST_ADDRESS", "host_address"), ("NODE_UUID", "node_uuid")):
         if os.getenv(env_key):
             cfg[key] = os.environ[env_key]
+    if not isinstance(cfg.get("log_level", "INFO"), str):
+        parser.error("log_level must be a string; configuration contents withheld")
     setup_logging(cfg.get("log_level", "INFO"))
     try:
         return run(cfg)
     except Exception as e:
         # Lower layers use sanitized errors; never print tracebacks containing server responses.
-        LOG.error("%s", e)
+        # Unexpected library/schema exceptions can embed keys or token values.
+        message = str(e) if isinstance(e, RuntimeError) else f"Invalid input or runtime failure ({type(e).__name__}); contents withheld"
+        def redact(value):
+            nonlocal message
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if any(word in str(key).lower() for word in ("token", "password", "private", "secret", "cookie")) and isinstance(child, str) and child:
+                        message = message.replace(child, "[REDACTED]")
+                    else:
+                        redact(child)
+            elif isinstance(value, list):
+                for child in value:
+                    redact(child)
+        redact(cfg)
+        LOG.error("%s", message)
         return 1
 
 

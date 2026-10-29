@@ -2,14 +2,20 @@
 # Bootstrap a reviewed egames-fork checkout; never reset an existing checkout.
 set -Eeuo pipefail
 umask 077
-if (($#)); then
-    if [[ $# -eq 1 && ( $1 == --help || $1 == -h ) ]]; then
-        printf '%s\n' 'Usage: sudo bash bootstrap.sh' 'Optional: EGAMES_FORK_REF=<full commit SHA> NODE_UUID=<UUID> sudo -E bash bootstrap.sh'
-        exit 0
-    fi
-    printf 'Unexpected arguments; run bootstrap.sh --help.\n' >&2
-    exit 2
-fi
+mode='install'
+approve=()
+options=()
+while (($#)); do
+    case "$1" in
+        --help|-h)
+            printf '%s\n' 'Usage: EGAMES_FORK_REF=<reviewed full SHA> sudo -E bash bootstrap.sh [--dry-run] [--yes] [--config FILE]'
+            exit 0 ;;
+        --dry-run) mode='dry-run'; shift ;;
+        --yes) approve=(--yes); shift ;;
+        --config) [[ $# -ge 2 ]] || { echo 'Missing config path' >&2; exit 2; }; options+=(--config "$2"); shift 2 ;;
+        *) printf 'Unexpected argument; run bootstrap.sh --help.\n' >&2; exit 2 ;;
+    esac
+done
 readonly REPO='https://github.com/test-alexsun/egames-fork.git'
 readonly DEST='/opt/egames-fork'
 readonly LOGDIR='/var/log/egames-fork'
@@ -27,9 +33,27 @@ if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then
 fi
 docker compose version >/dev/null || fail 'Docker Compose is unavailable.'
 [[ ! -e "$CLI" ]] || { [[ -f "$CLI" ]] && head -n 2 "$CLI" | grep -q '# egames-fork managed wrapper'; } || fail "Existing $CLI is not owned by egames-fork."
+[[ ! -L "$LOGDIR" ]] || fail 'Symlink log directory is unsupported.'
+command -v flock >/dev/null || fail 'flock from util-linux is required.'
+exec 9>/run/lock/egames-fork-bootstrap.lock
+flock -n 9 || fail 'Another bootstrap is running.'
 mkdir -p "$LOGDIR"
 chmod 700 "$LOGDIR"
 log() { printf '%s [%s] %s\n' "$(date -u +%FT%TZ)" "$stage" "$*" | tee -a "$LOGDIR/bootstrap.log"; }
+# Check ownership/cleanliness before apt, venv or checkout mutations.
+[[ ! -L "$DEST" && ! -L "$CLI" ]] || fail 'Symlink installation paths are unsupported.'
+if [[ -e "$DEST" ]]; then
+    command -v git >/dev/null || fail 'git is needed to inspect the existing checkout before dependencies.'
+    [[ -d "$DEST/.git" ]] || fail 'Existing destination is not a Git checkout.'
+    [[ $(git -C "$DEST" remote get-url origin) == "$REPO" ]] || fail 'Existing checkout has a different origin.'
+    [[ -z $(git -C "$DEST" status --porcelain --untracked-files=normal) ]] || fail 'Existing checkout has local changes; preserve them before continuing.'
+fi
+ref=${EGAMES_FORK_REF:-}
+[[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]] || fail 'Set EGAMES_FORK_REF to the reviewed full commit SHA; moving main is not accepted.'
+sha=${ref,,}
+if [[ -d "$DEST/.git" ]]; then
+    [[ $(git -C "$DEST" rev-parse HEAD) == "$sha" ]] || fail 'Existing commit differs; update the checkout deliberately.'
+fi
 stage='dependencies'
 log 'Installing required Debian packages if missing.'
 packages=()
@@ -41,13 +65,6 @@ if ((${#packages[@]})); then
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}" >>"$LOGDIR/dependencies.log" 2>&1 || fail "apt install failed; see $LOGDIR/dependencies.log"
 fi
 stage='source'
-ref=${EGAMES_FORK_REF:-main}
-[[ "$ref" == main || "$ref" =~ ^[0-9a-fA-F]{40}$ ]] || fail 'EGAMES_FORK_REF must be main or a full 40-character commit SHA.'
-if [[ "$ref" == main ]]; then
-    sha=$(git ls-remote --exit-code "$REPO" refs/heads/main | awk '{print $1}') || fail 'Cannot resolve GitHub main.'
-else
-    sha=${ref,,}
-fi
 if [[ -e "$DEST" ]]; then
     [[ -d "$DEST/.git" ]] || fail "$DEST already exists and is not a Git checkout."
     [[ $(git -C "$DEST" remote get-url origin) == "$REPO" ]] || fail 'Existing checkout has a different origin.'
@@ -57,24 +74,35 @@ else
     git clone --no-checkout "$REPO" "$DEST" >>"$LOGDIR/dependencies.log" 2>&1 || fail 'Git clone failed.'
     git -C "$DEST" checkout --detach "$sha" >>"$LOGDIR/dependencies.log" 2>&1 || fail 'Requested commit unavailable in checkout.'
 fi
+# Require the reviewed bootstrap and source to come from exactly the same commit.
+cmp -s "${BASH_SOURCE[0]}" <(git -C "$DEST" show "$sha:bootstrap.sh") || fail 'Bootstrap differs from the pinned source commit.'
 log "Using commit $sha."
 stage='python environment'
 if [[ ! -e "$DEST/.venv" ]]; then
     python3 -m venv "$DEST/.venv" >>"$LOGDIR/dependencies.log" 2>&1 || fail 'Cannot create Python virtual environment.'
 fi
 [[ -x "$DEST/.venv/bin/python" ]] || fail 'Existing .venv is invalid; inspect it before retrying.'
-"$DEST/.venv/bin/python" -m pip install -r "$DEST/requirements.txt" >>"$LOGDIR/dependencies.log" 2>&1 || fail "Python dependencies failed; see $LOGDIR/dependencies.log"
+"$DEST/.venv/bin/python" -c 'import sys; supported = sys.version_info[:2] == (3, 13); print("Python compatibility: " + ("3.13 qualified" if supported else "WARNING: unqualified version; use CPython 3.13")); sys.exit(0 if supported else 1)' || fail 'Unsupported Python version; no infrastructure changes applied.'
+"$DEST/.venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r "$DEST/requirements.lock" >>"$LOGDIR/dependencies.log" 2>&1 || fail "Python dependencies failed; see $LOGDIR/dependencies.log"
 "$DEST/.venv/bin/python" -c 'import requests, yaml, cryptography' || fail 'Python dependencies are unavailable.'
 stage='preflight'
 log 'Checking existing eGames and validators.'
-bash "$DEST/install.sh" --check 2>&1 | tee "$LOGDIR/preflight.log" || fail 'Preflight failed; existing infrastructure was not modified.'
+bash "$DEST/install.sh" --check "${options[@]}" 2>&1 | tee "$LOGDIR/preflight.log" || fail 'Preflight failed; existing infrastructure was not modified.'
+if [[ "$mode" == dry-run ]]; then
+    log 'Read-only infrastructure plan complete. No API, Nginx or firewall changes applied.'
+    exit 0
+fi
 stage='backup'
-bash "$DEST/install.sh" --backup 2>&1 | tee -a "$LOGDIR/installation.log" || fail 'Backup failed; installation stopped.'
+bash "$DEST/install.sh" --backup "${options[@]}" 2>&1 | tee -a "$LOGDIR/installation.log" || fail 'Backup failed; installation stopped.'
 stage='installation'
-bash "$DEST/install.sh" --install 2>&1 | tee -a "$LOGDIR/installation.log" || fail 'Installation failed; inspect the transaction journal and logs.'
+bash "$DEST/install.sh" --install "${approve[@]}" "${options[@]}" 2>&1 | tee -a "$LOGDIR/installation.log" || fail 'Installation failed; inspect the transaction journal and logs.'
 stage='post-install'
-bash "$DEST/install.sh" --check 2>&1 | tee "$LOGDIR/post-install.log" || fail 'Post-install check failed.'
-cat >"$CLI" <<'WRAPPER'
+if ! bash "$DEST/install.sh" --check "${options[@]}" 2>&1 | tee "$LOGDIR/post-install.log"; then
+    bash "$DEST/install.sh" --restore --yes "${options[@]}" 2>&1 | tee -a "$LOGDIR/installation.log" || fail 'Post-install failure; rollback incomplete. Preserve state and journal.'
+    fail 'Post-install check failed; guarded transaction rollback completed.'
+fi
+wrapper=$(mktemp /usr/local/bin/.egames-fork-XXXXXX)
+cat >"$wrapper" <<'WRAPPER'
 #!/usr/bin/env bash
 # egames-fork managed wrapper
 set -Eeuo pipefail
@@ -90,5 +118,6 @@ if [[ -z ${NODE_UUID:-} && -f /var/lib/egames-injector/state.json ]]; then
 fi
 exec bash /opt/egames-fork/install.sh "--$mode" "$@"
 WRAPPER
-chmod 755 "$CLI"
+chmod 755 "$wrapper"
+mv -- "$wrapper" "$CLI"
 log 'Installation completed. Client connections and subscription generation: NOT TESTED.'
