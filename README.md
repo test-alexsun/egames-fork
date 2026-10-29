@@ -297,8 +297,9 @@ XRAY_BINARY=/path/to/xray NGINX_BINARY=/path/to/nginx python3 tests/validate_bin
 
 GitHub Actions содержит Ubuntu и Debian13 unit checks, Bash/ShellCheck, pinned
 Xray checksum и Nginx OCI digest из `validation-manifest.json`; контейнер Nginx
-запускается с `--network none` только для `nginx -t`. CI этой ветки не запускался.
-Точные выполненные локальные проверки и пропуски приведены в CODEX_02.
+запускается с `--network none` только для `nginx -t`. Debian/Ubuntu CI кандидата
+прошёл: по 106 tests без SKIP, Linux Xray/Nginx validators PASS.
+Проверенный SHA и результаты: [CODEX_04_RELEASE](docs/CODEX_04_RELEASE.md).
 
 Runtime verification сопоставляет API config, cold config штатного Node CLI,
 перезапуск Xray при изменении базовой конфигурации и владельца TCP/UDP listeners.

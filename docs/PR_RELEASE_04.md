@@ -19,7 +19,7 @@ Lost POST response без UUID блокирует автоматическую �
 
 ## Проверки
 
-- 105 tests: 103 PASS, 2 POSIX-only SKIP на Windows.
+- Debian13 и Ubuntu CI: по 106 PASS, 0 SKIP; предыдущий Windows прогон — 103 PASS / 2 SKIP.
 - Новые regressions R01–R05; public install/repeat/repair/update/backup/restore/
   uninstall/reinstall с synthetic API; UFW/Nginx/API typed recovery.
 - Bootstrap shell orchestration: dry-run, success, post-check failure→restore.
@@ -29,7 +29,9 @@ Lost POST response без UUID блокирует автоматическую �
 - Девять Linux wheels проверены offline с hashes; pip check PASS.
 - Heuristic secret scan reachable blobs/current files: совпадений нет.
 - Новая ветка не применялась к production; эксплуатационная инвентаризация не публикуется.
-- GitHub CI должен пройти на PR; результат до запуска не заявляется.
+- CI SHA7687f05 PASS: https://github.com/test-alexsun/egames-fork/actions/runs/40895735396
+  (checks + debian-unit, реальные Linux Xray/Nginx validators).
+- Исправлена зависимость synthetic fixture от наличия UFW на runner; runtime guards сохранены.
 
 ## Совместимость и риски
 

@@ -68,7 +68,8 @@ esac
             driver.write_text('export PATH="$TEST_ROOT/bin:/usr/bin:/bin:$PATH"\nexec bash "$TEST_ROOT/bootstrap.sh" ' +
                               ('--dry-run' if mode == 'dry-run' else '--yes') + '\n', newline='\n')
             result = subprocess.run([BASH, base + '/driver.sh'], cwd=ROOT, env=env, text=True,
-                                    encoding='utf-8', errors='replace', capture_output=True, timeout=30)
+                                    encoding='utf-8', errors='replace', capture_output=True,
+                                    timeout=60 if os.name == 'nt' else 30)
             calls = (root / 'calls').read_text().splitlines() if (root / 'calls').exists() else []
             return result, calls
 

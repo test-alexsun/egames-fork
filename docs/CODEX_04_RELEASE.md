@@ -8,12 +8,12 @@ Production deployment, merge и release не выполнялись.
 - Репозиторий: https://github.com/test-alexsun/egames-fork
 - Ветка: `fix/release-04-public`; target: `main`; PR только draft.
 - Публичная база: `7268cb6c63aaa6520bd8dd142f7cf87e34e847df`.
-- Кандидат для стенда: `7156a409597763d6b14800e685981343c56aade4`; не production-approved.
+- Кандидат для стенда: `7687f051a7cc890f5a8191dad84e583d31c4bdcd`; не production-approved.
 - Полные локальные отчёты и private branch history не включены. Сводки CODEX_01/02/03
   здесь обезличены. Реальные домены/IP/выделенные порты/состояния Hosts/Node отсутствуют.
 - Имена в tests/fixtures относятся к синтетическим example.com и documentation IP.
 - История main до точки ветвления уже публична и не переписывается этим PR.
-- PR: создаётся после проверки публичного payload; ссылка будет добавлена.
+- PR: [draft #4](https://github.com/test-alexsun/egames-fork/pull/4), без merge/release.
 
 ## 2. Исправления независимого review
 
@@ -58,7 +58,7 @@ POST response: для неопределённого UUID проверяет о�
 
 | Проверка | Результат |
 |---|---|
-| `python -B -m unittest discover -s tests -q` | **105 tests: 103 PASS, 2 SKIP**, 65.422 s. SKIP — POSIX ownership/mode на Windows |
+| Python unit/synthetic integration | **Linux Debian13: 106 PASS, 0 SKIP (3.653 s); Ubuntu: 106 PASS, 0 SKIP (3.308 s)**. Предыдущий Windows прогон: 105 tests, 103 PASS / 2 POSIX-only SKIP |
 | Новые регрессии R01–R05 | PASS, 8 test methods, включая многократные fault subcases и публичный цикл |
 | Bash syntax всех root/test shell scripts | PASS, Git Bash `bash -n` |
 | ShellCheck всех root/test shell scripts | PASS, `.tools/shellcheck/shellcheck.exe` через Bash glob |
@@ -76,7 +76,7 @@ POST response: для неопределённого UUID проверяет о�
 | Миграция технических tags | PASS безопасного отказа migrate/legacy rollback до writes; реальная миграция BLOCKED, не выдаётся за работающую |
 | Git secret heuristic | PASS на reachable blobs и текущих nonignored файлах, high-confidence hits=0; не доказательство отсутствия любого секрета |
 | git diff --check | PASS |
-| GitHub Actions кандидата / PR | PENDING: ветка подготовлена к публикации; PASS заранее не заявляется |
+| GitHub Actions кандидата / PR | **PASS** для SHA7687f05: [run40895735396](https://github.com/test-alexsun/egames-fork/actions/runs/40895735396), checks + debian-unit success; Linux Xray checksum и Nginx validators PASS |
 | Настоящая Debian13 Panel3.4.7/PostgreSQL/Node3.4.3 integration | **BLOCKED:** Docker CLI локально отсутствует, WSL distro недоступен, disposable сервер не предоставлен |
 | Полный bootstrap на чистом Debian13 | **NOT TESTED**, сеть/apt/venv на настоящей ОС и installation SHA не испытаны |
 | SIGKILL/ENOSPC/reboot каждого Linux boundary, persistent API outage/concurrency | **NOT TESTED** на настоящей инфраструктуре |
@@ -86,6 +86,30 @@ POST response: для неопределённого UUID проверяет о�
 Первые ошибки Windows temp access и glob expansion устранены выбором workspace
 TEMP/TMP и Bash glob; финальные результаты приведены выше. Системные тесты не
 подменяются mock PASS. Полная эксплуатационная инвентаризация не публикуется.
+
+Первый Ubuntu CI упал: fixture command возвращал `[]` для `ufw status`, если
+на runner был установлен UFW. Fixture теперь возвращает explicit inactive state;
+добавлена регрессия среды с установленным UFW. Runtime guard не ослаблялся.
+Повторный Linux CI прошёл все 106 tests. Node20 deprecation warning pinned Actions
+не является причиной падения; обновление Actions требует отдельной проверки.
+Последний дополнительный Windows full run: 106 tests, один bootstrap subprocess
+TimeoutExpired на лимите 30 s, два POSIX-only SKIP. Для Windows лимит увеличен
+до 60 s; Linux limit остаётся 30 s. Это отказ переносимости тестового harness,
+не успешный системный bootstrap. Отдельный повтор Windows bootstrap указан ниже.
+Повтор после изменения лимита: **3 bootstrap orchestration tests PASS**, 88.244 s.
+
+## 5. Версии и граница совместимости
+
+| Компонент | Подтверждённая граница |
+|---|---|
+| ОС / Python | Debian13, CPython3.13; CI также Ubuntu24.04 |
+| Panel / Node | Адаптер разрешает только 3.4.7 / 3.4.3; настоящая интеграция остаётся gate |
+| Xray validator | 26.10.21, официальный Linux archive с закреплённым checksum |
+| Nginx validator | Pinned nginx:1.30 OCI digest из validation-manifest.json; network-none nginx -t |
+| Docker / Compose | Проверяются capabilities; диапазон production версий не квалифицирован |
+| Python dependencies | requirements.lock: 9 hashes-pinned пакетов; Linux wheel closure PASS |
+
+Таблица содержит параметры адаптера/CI, а не инвентаризацию production серверов.
 
 ## 6. Поддерживаемые и неподтверждённые сценарии
 
@@ -124,7 +148,7 @@ external firewall IPv4/IPv6/UDP, renewal lifecycle и runtime plugins traffic ef
 
 ```bash
 git clone --no-checkout https://github.com/test-alexsun/egames-fork.git egames-fork-review
-git -C egames-fork-review checkout --detach 7156a409597763d6b14800e685981343c56aade4
+git -C egames-fork-review checkout --detach 7687f051a7cc890f5a8191dad84e583d31c4bdcd
 git -C egames-fork-review rev-parse HEAD
 less egames-fork-review/bootstrap.sh
 ```
@@ -133,7 +157,7 @@ less egames-fork-review/bootstrap.sh
 bootstrap/dependencies установка addon запускается **одной командой**:
 
 ```bash
-sudo env EGAMES_FORK_REF=7156a409597763d6b14800e685981343c56aade4 bash ./egames-fork-review/bootstrap.sh
+sudo env EGAMES_FORK_REF=7687f051a7cc890f5a8191dad84e583d31c4bdcd bash ./egames-fork-review/bootstrap.sh
 ```
 
 Сначала добавьте `--dry-run`: готовит checkout/apt/venv, проверяет capabilities,
@@ -182,7 +206,7 @@ drift остановиться и сверить ownership вручную. Legac
    disabled/access ради тестов. External provider firewall также gate.
 4. LICENSE: в проекте отсутствует файл при прежнем MIT заявлении; владелец
    должен подтвердить лицензию/правообладателей. Новая лицензия не назначалась.
-5. GitHub CI итогового кандидата/PR должен завершиться успешно и быть проверен.
+5. CI кандидата завершён успешно; изменения runtime требуют повторной квалификации.
 6. Утвердить maintenance/RPO/RTO/full backup restore и окончательный production SHA;
    **production apply целевого VPS требует отдельного разрешения**. Дополнительный production сервер не изменяется.
 
