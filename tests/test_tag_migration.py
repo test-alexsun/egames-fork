@@ -54,69 +54,44 @@ class MigrationTests(unittest.TestCase):
         self.health.start()
         self.addCleanup(self.health.stop)
 
-    def test_api_cascade_rebound_and_only_tags_changed(self):
-        before = copy.deepcopy(self.api.profile['config'])
-        new = m.migrate(self.api, self.rt, self.tmp.name, self.state)
-        mapping = {'EGADDON-XHTTP': 'Vless-XHTTP-tcp'}
-        self.assertEqual(self.api.profile['config'], rename_config(before, mapping))
-        self.assertEqual(new['paths'], {'Vless-XHTTP-tcp': '/keep/'})
-        self.assertEqual(new['history'], [])
-        h = self.api.hosts[-1]
-        self.assertTrue(h['isDisabled'])
-        self.assertEqual(h['remark'], 'Keep name')
-        self.assertEqual(h['inbound']['configProfileInboundUuid'], 'iid-Vless-XHTTP-tcp')
-        self.assertIn('iid-Vless-XHTTP-tcp', s.active_ids(self.api.nodes[0]))
-        self.assertIn({'uuid': 'iid-Vless-XHTTP-tcp'}, self.api.squads[0]['inbounds'])
-        self.assertEqual(self.api.profile['config']['routing']['rules'][0]['outboundTag'], 'EGADDON-XHTTP')
+    def test_uuid_changing_migration_is_blocked_with_zero_writes(self):
+        original = copy.deepcopy(self.api.__dict__)
+        with self.assertRaisesRegex(RuntimeError, 'regenerates inbound UUIDs'):
+            m.migrate(self.api, self.rt, self.tmp.name, self.state)
+        self.assertEqual(self.api.__dict__, original)
 
-    def test_failure_and_lost_reply_restore_new_original_uuids(self):
-        for lost in (False, True):
-            with self.subTest(lost=lost):
-                original = copy.deepcopy(self.api.profile['config'])
-                if lost:
-                    self.api.lose_reply = True
+    def test_restore_refuses_legacy_snapshots_and_all_external_drift(self):
+        for change in ('dns', 'inbound', 'membership', 'host'):
+            with self.subTest(change=change):
+                snapshot = m.prepare(self.api, self.state)
+                snapshot['status'] = 'committed'
+                if change == 'dns':
+                    self.api.profile['config']['dns'] = {'servers': ['9.9.9.9']}
+                elif change == 'inbound':
+                    self.api.profile['config']['inbounds'].append({'tag': 'external', 'port': 5555})
+                elif change == 'membership':
+                    self.api.squads[0]['inbounds'] = []
                 else:
-                    self.api.fail = '/hosts'
-                with self.assertRaises(RuntimeError):
-                    m.migrate(self.api, self.rt, self.tmp.name, self.state)
-                self.assertEqual(self.api.profile['config'], original)
-                self.assertEqual(self.api.hosts[-1]['inbound']['configProfileInboundUuid'], 'iid-EGADDON-XHTTP')
-                self.assertEqual(json.loads((Path(self.tmp.name) / 'tag-migration.json').read_text())['status'], 'rolled_back')
+                    self.api.hosts[-1]['uuid'] = 'recreated-by-operator'
+                original = copy.deepcopy(self.api.__dict__)
+                with self.assertRaisesRegex(RuntimeError, 'Legacy tag restore is blocked'):
+                    m.rollback(self.api, self.rt, self.tmp.name, snapshot)
+                self.assertEqual(self.api.__dict__, original)
 
-    def test_drift_refused_before_api_write(self):
+    def test_plan_is_read_only_and_checks_managed_drift(self):
+        plan = m.prepare(self.api, self.state)
+        self.assertIn('EGADDON-XHTTP', plan['mapping'])
+        self.assertFalse(self.api.writes)
         self.api.profile['config']['inbounds'][-1]['port'] += 1
         with self.assertRaisesRegex(RuntimeError, 'drift'):
-            m.migrate(self.api, self.rt, self.tmp.name, self.state)
-        self.assertFalse(self.api.writes)
+            m.prepare(self.api, self.state)
 
-    def test_health_failure_rolls_back(self):
-        with patch.object(m, 'verify_runtime', side_effect=[RuntimeError('health failed'), None]):
-            with self.assertRaisesRegex(RuntimeError, 'health failed'):
-                m.migrate(self.api, self.rt, self.tmp.name, self.state)
-        self.assertEqual(self.api.profile['config']['inbounds'][-1]['tag'], 'EGADDON-XHTTP')
-
-    def test_template_references_block_before_write(self):
+    def test_template_references_block_proposal(self):
         original = self.api.get
         self.api.get = lambda path: [{'template': {'inboundTag': ['EGADDON-XHTTP']}}] if path == '/subscription-templates' else original(path)
         with self.assertRaisesRegex(RuntimeError, 'template'):
-            m.migrate(self.api, self.rt, self.tmp.name, self.state)
+            m.prepare(self.api, self.state)
         self.assertFalse(self.api.writes)
-
-    def test_concurrent_binding_edit_not_overwritten(self):
-        original = self.api.get
-        reads = 0
-        def get(path):
-            nonlocal reads
-            if path == '/hosts':
-                reads += 1
-                if reads == 2:
-                    self.api.hosts[-1]['remark'] = 'Operator edit'
-            return original(path)
-        self.api.get = get
-        with self.assertRaisesRegex(RuntimeError, 'Concurrent'):
-            m.migrate(self.api, self.rt, self.tmp.name, self.state)
-        self.assertFalse(self.api.writes)
-        self.assertEqual(self.api.hosts[-1]['remark'], 'Operator edit')
 
     def test_naming_and_unique_suffixes(self):
         used = set()

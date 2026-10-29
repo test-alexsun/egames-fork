@@ -5,6 +5,10 @@
 # node_uuid: ""
 # node_container: ""
 # nginx_container: ""
+# topology: "single-host"  # node-only: read-only check/status/dry-run, explicit HTTPS API + node_uuid
+# cookie_file: "/root/panel-cookie"  # optional existing gateway credential, mode 600
+# required_protocols: [WS, XHTTP, GRPC, XREALITY, SS2022, HY2, PQ]
+# Default required: WS, XHTTP, GRPC, XREALITY, SS2022. HY2 and PQ optional with explicit diagnostics.
 # host_address: "node.example.com"  # defaults to existing REALITY serverNames[0]
 # host_country_code: "FI"  # optional verified ISO country; default: HTTPS GeoIP of host_address IPv4
 timeout: 30

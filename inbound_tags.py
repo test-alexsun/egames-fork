@@ -2,29 +2,42 @@
 import copy
 
 
-def descriptive_tag(inbound):
+def effective_flow(inbound):
+    """Panel 3.4.7 getVlessFlow semantics, including explicit empty override."""
+    if inbound.get('protocol') != 'vless' or not isinstance(inbound.get('settings'), dict):
+        return ''
+    settings = inbound['settings']
+    if 'flow' in settings:
+        return 'xtls-rprx-vision' if settings['flow'] == 'xtls-rprx-vision' else ''
+    stream = inbound.get('streamSettings', {})
+    return 'xtls-rprx-vision' if (stream.get('security') in ('tls', 'reality') and
+                                stream.get('network') in ('raw', 'tcp')) else ''
+
+
+def descriptive_tag(inbound, *, spaced=False):
     protocol = inbound['protocol']
     stream = inbound.get('streamSettings', {})
     network = stream.get('network', 'raw')
     names = {'vless': 'Vless', 'trojan': 'Trojan', 'shadowsocks': 'Shadowsocks', 'hysteria': 'Hysteria2'}
+    suffix = ' -' if spaced else '-'
     if protocol not in names:
         raise ValueError('Unsupported managed protocol: ' + protocol)
     if protocol == 'hysteria':
         if inbound.get('settings', {}).get('version') != 2:
             raise ValueError('Expected Hysteria version 2')
-        return 'Hysteria2-QUIC-udp'
+        return 'Hysteria2-QUIC' + suffix + 'udp'
     if protocol == 'shadowsocks':
         networks = set(inbound.get('settings', {}).get('network', 'tcp,udp').split(','))
         if not networks or networks - {'tcp', 'udp'}:
             raise ValueError('Unknown Shadowsocks network')
         net = '+'.join(n for n in ('tcp', 'udp') if n in networks)
-        return 'Shadowsocks-' + net.upper() + '-' + net
+        return 'Shadowsocks-' + net.upper() + suffix + net
     transport = {'ws': 'WS', 'xhttp': 'XHTTP', 'grpc': 'gRPC', 'raw': 'TCP', 'tcp': 'TCP'}.get(network)
     if transport is None:
         raise ValueError('Unsupported managed transport: ' + network)
     if network in ('raw', 'tcp') and stream.get('security') == 'reality':
-        transport = 'Vision' if any(c.get('flow') == 'xtls-rprx-vision' for c in inbound.get('settings', {}).get('clients', [])) else 'Reality'
-    return names[protocol] + '-' + transport + '-tcp'
+        transport = 'Vision' if effective_flow(inbound) else 'Reality'
+    return names[protocol] + '-' + transport + suffix + 'tcp'
 
 
 def allocate(base, occupied):

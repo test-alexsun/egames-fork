@@ -72,6 +72,8 @@ class API:
         if self.lose_reply:
             self.lose_reply = False
             raise RuntimeError("API timeout after server accepted request")
+        if path == '/hosts' and method == 'POST':
+            return copy.deepcopy(self.hosts[-1])
 
 
 class Runtime:
@@ -97,6 +99,12 @@ class Runtime:
 
     def validate_nginx(self, config):
         s.nginx_blocks(config)
+
+    def verify_mounted_file(self, inside, path):
+        pass
+
+    def core_pids(self):
+        return {123}
 
     def write_nginx(self, config):
         self.nginx_path.write_text(config)
@@ -207,7 +215,7 @@ class SafeTests(unittest.TestCase):
     def test_country_rename_detects_concurrent_original_host_edit(self):
         p = self.plan()
         self.api.hosts[0]["remark"] = "Changed in Panel"
-        with self.assertRaisesRegex(RuntimeError, "Original Host changed"):
+        with self.assertRaisesRegex(RuntimeError, "Concurrent binding"):
             self.apply(p)
         self.assertEqual(self.api.hosts[0]["remark"], "Changed in Panel")
 
@@ -295,7 +303,7 @@ class SafeTests(unittest.TestCase):
 
     def test_pq_has_real_seed_and_no_vision(self):
         p = self.plan()
-        ib = next(i for i in p["config"]["inbounds"] if i["tag"] == "Vless-Reality-tcp")
+        ib = next(i for i in p["config"]["inbounds"] if i["tag"] == "Vless-Reality -tcp")
         self.assertTrue(ib["settings"]["decryption"].startswith("mlkem768x25519plus."))
         self.assertEqual(ib["settings"]["flow"], "")
         self.assertEqual(ib["streamSettings"]["network"], "raw")
@@ -303,7 +311,7 @@ class SafeTests(unittest.TestCase):
     def test_missing_pq_generator_does_not_create_fake_pq(self):
         self.rt.core = Mock(side_effect=RuntimeError("no vlessenc"))
         p = self.plan()
-        self.assertNotIn("Vless-Reality-tcp", [i["tag"] for i in p["config"]["inbounds"]])
+        self.assertNotIn("Vless-Reality -tcp", [i["tag"] for i in p["config"]["inbounds"]])
 
     def test_vmess_and_missing_hy2_mount_reported(self):
         p = self.plan()
@@ -313,7 +321,7 @@ class SafeTests(unittest.TestCase):
     def test_hy2_version_2_and_udp443(self):
         self.rt.node["Mounts"] = [{"Source": "/etc/ssl", "Destination": "/tls"}]
         p = self.plan()
-        ib = next(i for i in p["config"]["inbounds"] if i["tag"] == "Hysteria2-QUIC-udp")
+        ib = next(i for i in p["config"]["inbounds"] if i["tag"] == "Hysteria2-QUIC -udp")
         self.assertEqual(ib["settings"]["version"], 2)
         self.assertEqual(ib["streamSettings"]["hysteriaSettings"]["version"], 2)
         self.assertEqual(ib["port"], 443)
@@ -321,7 +329,7 @@ class SafeTests(unittest.TestCase):
     def test_hy2_udp_conflict_does_not_touch_tcp443(self):
         self.rt.node["Mounts"] = [{"Source": "/etc/ssl", "Destination": "/tls"}]
         p = self.plan({("tcp", 443), ("udp", 443)})
-        self.assertNotIn("Hysteria2-QUIC-udp", [i["tag"] for i in p["config"]["inbounds"]])
+        self.assertNotIn("Hysteria2-QUIC -udp", [i["tag"] for i in p["config"]["inbounds"]])
         self.assertEqual(p["config"]["inbounds"][0]["port"], 443)
 
     def test_unknown_panel_fails_closed(self):
@@ -478,15 +486,15 @@ class SafeTests(unittest.TestCase):
         expected = {"uuid": "q", "inbounds": ["b", "a"]}
         self.assertTrue(s.same_operation_value({"kind": "squad"}, value, expected))
 
-    def test_real_xray_rejection_skips_inbound_before_mutation(self):
+    def test_real_xray_rejection_blocks_required_inbound_before_mutation(self):
         base_validator = self.rt.validate_xray
         def validate(config):
-            if any(i["tag"] == "Vless-XHTTP-tcp-2" for i in config["inbounds"]):
+            if any(i["tag"] == "Vless-XHTTP -tcp-2" for i in config["inbounds"]):
                 raise RuntimeError("unsupported transport")
             return base_validator(config)
         self.rt.validate_xray = validate
-        p = self.plan()
-        self.assertNotIn("Vless-XHTTP-tcp-2", [i["tag"] for i in p["config"]["inbounds"]])
+        with self.assertRaisesRegex(RuntimeError, "Required capabilities unavailable: XREALITY"):
+            self.plan()
         self.assertFalse(self.api.writes)
 
     def test_uninstall_history_restores_original_across_repeat(self):
