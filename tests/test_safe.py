@@ -120,7 +120,9 @@ class SafeTests(unittest.TestCase):
         self.api = API()
         self.rt = Runtime(self.tmp.name)
         self.state = {"owner": s.OWNER, "tags": [], "hosts": [], "paths": {}}
-        self.cmd = patch.object(s, "command", return_value=types.SimpleNamespace(stdout="[]", returncode=0))
+        self.cmd = patch.object(s, "command", side_effect=lambda args, *a, **kw:
+            types.SimpleNamespace(stdout="Status: inactive\n" if args[:2] == ["ufw", "status"] else "[]",
+                                  returncode=0))
         self.cmd.start()
         self.addCleanup(self.cmd.stop)
         self.geo = patch.object(s, "lookup_country_code", return_value="FI")
@@ -141,6 +143,12 @@ class SafeTests(unittest.TestCase):
         self.plan()
         self.assertEqual(self.api.__dict__, original)
         self.assertEqual(sorted(Path(self.tmp.name).rglob("*")), before)
+
+    def test_fixture_is_independent_of_runner_ufw_installation(self):
+        with patch.object(s.shutil, 'which', return_value='/usr/sbin/ufw'):
+            self.assertIsNone(s.firewall_status())
+            self.plan()
+        self.assertEqual(self.api.writes, [])
 
     def test_country_host_names_cover_all_eight_protocols(self):
         expected = {
